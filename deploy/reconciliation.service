@@ -1,0 +1,24 @@
+[Unit]
+Description=Reconciliation Flexcube (API + Streamlit)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reconc
+Group=reconc
+WorkingDirectory=/opt/reconciliation
+Environment=PATH=/opt/reconciliation/.venv/bin:/usr/local/bin:/usr/bin
+EnvironmentFile=-/opt/reconciliation/.env
+ExecStart=/opt/reconciliation/.venv/bin/python /opt/reconciliation/run_all.py
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=20
+
+# Sécurité de base
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

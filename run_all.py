@@ -23,9 +23,23 @@ import signal
 import threading
 import time
 
+# En prod, nginx reverse-proxifie vers localhost (voir deploy/).
 SERVICES = [
     ("reconc", ["uvicorn", "gateway.reconc:app", "--host", "127.0.0.1", "--port", "8002"]),
-    ("streamlit", ["streamlit", "run", "ui/streamlit_app.py", "--server.headless", "true"]),
+    (
+        "streamlit",
+        [
+            "streamlit",
+            "run",
+            "ui/streamlit_app.py",
+            "--server.headless",
+            "true",
+            "--server.address",
+            "127.0.0.1",
+            "--server.port",
+            "8501",
+        ],
+    ),
 ]
 
 processus = []

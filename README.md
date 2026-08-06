@@ -1,6 +1,6 @@
 # Reconciliation Flexcube — API unifiée
 
-## Lancer
+## Lancer (local)
 
 ```bash
 source .venv/bin/activate
@@ -10,6 +10,28 @@ python run_all.py
 - API : http://127.0.0.1:8002
 - Streamlit : http://localhost:8501
 - Secrets : `.env` (voir `.env.example`)
+
+## Déploiement prod (nginx + systemd)
+
+Sur le serveur (Debian/Ubuntu), depuis le dépôt :
+
+```bash
+sudo bash deploy/install.sh /opt/reconciliation reconc.votredomaine.local
+```
+
+Puis renseigner Oracle dans `/opt/reconciliation/.env` et redémarrer :
+
+```bash
+sudo nano /opt/reconciliation/.env
+sudo systemctl restart reconciliation
+```
+
+- UI : `http://<serveur>/`
+- API (via nginx) : `http://<serveur>/health`, `/svc/...`, `/charger`, …
+- Module_FED sur la même machine peut toujours appeler `http://127.0.0.1:8002`
+- Logs : `journalctl -u reconciliation -f`
+
+Fichiers : `deploy/nginx-reconciliation.conf`, `deploy/reconciliation.service`, `deploy/install.sh`.
 
 ## Structure
 
