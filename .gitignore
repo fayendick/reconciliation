@@ -2,7 +2,7 @@
 .env.local
 *.pyc
 __pycache__/
-.venv/
+
 .venv_windows/
 venv/
 *.db
