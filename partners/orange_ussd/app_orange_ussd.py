@@ -52,6 +52,34 @@
 # schéma côté ORANGE_USSD (à vérifier dans ces fichiers — NON VÉRIFIÉ
 # faute d'avoir excel_common.py : c'est la piste la plus probable si
 # le résultat reste vide malgré le correctif de reconciliation_engine.py).
+#
+# ------------------------------------------------------------
+# [CORRECTIF 2026-08-23] BUG "/charger répond succès alors que
+# l'Excel Orange USSD n'a jamais été chargé" :
+#
+#   CAUSE RÉELLE : /process-excel attrapait TOUTE exception
+#   (mapping de colonnes, fichier illisible, etc.) et renvoyait un
+#   dict {"status": "error", ...} avec le code HTTP PAR DÉFAUT DE
+#   FASTAPI, c'est-à-dire 200 (aucune HTTPException levée). Or
+#   gateway/reconc.py -> /charger ne vérifie QUE le code HTTP de la
+#   réponse de ce service :
+#
+#       if excel_response.status_code != 200:
+#           raise HTTPException(...)
+#
+#   Comme le code restait 200 même en cas d'échec interne, cette
+#   vérification ne se déclenchait jamais : /charger poursuivait
+#   vers l'extraction Flex et répondait "success" au final, alors
+#   qu'aucune table COMPILATION_ORANGE_USSD* n'avait été écrite.
+#   Exactement le piège déjà documenté dans orange_ussd_flex_api.py
+#   ("ne jamais renvoyer une erreur avec un code 200").
+#
+#   -> FIX : le bloc except lève maintenant une HTTPException(500, ...)
+#      au lieu de renvoyer un dict avec un code 200 implicite. Le
+#      message d'erreur réel (colonne manquante, fichier illisible,
+#      etc.) remonte alors correctement jusqu'à /charger, qui le
+#      renvoie tel quel à l'appelant au lieu de le masquer.
+# ------------------------------------------------------------
 # ============================================================
 
 import io
@@ -101,9 +129,6 @@ def _normaliser_type_transaction(service: pd.Series) -> pd.Series:
     return service.astype(str).str.strip().str.upper().replace({
         "CASH IN": "W2B",
         "CASH OUT": "B2W",
-        
-        
-    
     })
 
 
@@ -169,6 +194,12 @@ async def process_excel(
         # 4. SAUVEGARDE SQLITE : 1 table + 2 vues
         sauvegarder_excel_w2b_b2w(df_final, TABLES, engine, "app_orange_ussd")
 
+        print(
+            f"[app_orange_ussd.py] Chargement Excel réussi : "
+            f"{len(df_final)} lignes ({len(compile_w2b)} W2B / {len(compile_b2w)} B2W) "
+            f"-> {TABLES['excel']}"
+        )
+
         # 5. EXPORT (Excel si demandé, sinon JSON léger pour /charger)
         return respond_sheets(
             {
@@ -183,7 +214,21 @@ async def process_excel(
     except HTTPException:
         raise
     except Exception as e:
-        return {"status": "error", "message": str(e), "trace": traceback.format_exc()}
+        # [CORRECTIF 2026-08-23] IMPORTANT : ne jamais renvoyer une
+        # erreur avec un code 200 — /charger (gateway/reconc.py)
+        # considérerait alors, à tort, que le chargement Excel a
+        # réussi alors que rien n'a été sauvegardé. On lève donc une
+        # vraie HTTPException (500) au lieu de `return {"status":
+        # "error", ...}`, pour que excel_response.status_code != 200
+        # soit correctement détecté côté /charger et que le message
+        # d'erreur réel (colonne manquante, fichier illisible, etc.)
+        # remonte jusqu'à l'appelant au lieu d'être masqué.
+        trace = traceback.format_exc()
+        print(f"[app_orange_ussd.py] ERREUR /process-excel : {e}\n{trace}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Échec du traitement Excel Orange USSD : {e}",
+        )
 
 
 @app.get("/db/compilation")

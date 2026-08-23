@@ -81,7 +81,26 @@ _CONFIG_DIR = _PROJECT_ROOT
 
 
 def _load_dotenv(path: str | None = None) -> None:
-    """Charge un fichier .env sans écraser les variables déjà présentes."""
+    """Charge un fichier .env sans écraser les variables déjà présentes
+    dans l'environnement du process (comportement standard : une vraie
+    variable d'env, définie AVANT le lancement du process, a toujours
+    priorité sur le fichier .env).
+
+    [CORRECTIF 2026-08-23] Ce comportement "silencieux" est une source
+    de bugs difficiles à diagnostiquer : si une variable (typiquement
+    RECON_DB_PATH) a été définie un jour comme variable d'environnement
+    Windows PERSISTANTE (setx, Paramètres système, profil PowerShell...),
+    alors TOUTE modification du fichier .env est ignorée sans le moindre
+    avertissement, et rien dans les logs ne l'indique. C'est exactement
+    ce qui s'est produit ici : RECON_DB_PATH pointait vers un ancien
+    chemin cassé (C:\\reconciliation\\data\\base.d), et corriger le .env
+    n'avait aucun effet tant que cette variable système restait définie.
+
+    -> On journalise maintenant, pour CHAQUE clé du .env, si elle a été
+       ignorée parce qu'une variable d'environnement du même nom existait
+       déjà — avec les deux valeurs (celle qui gagne vs celle du .env) —
+       pour rendre ce cas immédiatement visible dans les logs au
+       démarrage, au lieu de devoir le déduire indirectement."""
     env_path = path or os.path.join(_PROJECT_ROOT, ".env")
     if not os.path.isfile(env_path):
         return
@@ -93,11 +112,23 @@ def _load_dotenv(path: str | None = None) -> None:
                     continue
                 key, _, val = line.partition("=")
                 key = key.strip()
-                if not key or key in os.environ:
+                if not key:
                     continue
                 val = val.strip()
                 if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
                     val = val[1:-1]
+                if key in os.environ:
+                    if os.environ[key] != val:
+                        print(
+                            f"[config._load_dotenv] ATTENTION : '{key}' est déjà défini "
+                            f"comme variable d'environnement système (valeur actuelle "
+                            f"utilisée : '{os.environ[key]}') — la valeur du .env "
+                            f"('{val}') est IGNORÉE. Si ce n'est pas voulu, supprime "
+                            f"cette variable d'environnement système "
+                            f"([System.Environment]::SetEnvironmentVariable('{key}', "
+                            f"$null, 'User')) puis rouvre un nouveau terminal."
+                        )
+                    continue
                 os.environ[key] = val
     except OSError:
         pass
@@ -115,6 +146,32 @@ DB_PATH = os.getenv(
     "RECON_DB_PATH",
     os.path.join(_PROJECT_ROOT, "data", "base.db")
 )
+
+# [CORRECTIF 2026-08-23] Log explicite de la SOURCE de DB_PATH (variable
+# d'env déjà présente au démarrage du process vs valeur par défaut
+# calculée depuis _PROJECT_ROOT), pour diagnostiquer en un coup d'œil
+# tout chemin inattendu au démarrage, sans avoir à fouiller .env ou les
+# variables système à la main.
+if "RECON_DB_PATH" in os.environ:
+    print(f"[config.py] RECON_DB_PATH défini via l'environnement -> DB_PATH = {DB_PATH}")
+else:
+    print(f"[config.py] RECON_DB_PATH absent -> valeur par défaut -> DB_PATH = {DB_PATH}")
+
+# [CORRECTIF 2026-08-23] Crée le dossier parent de la base SQLite s'il
+# n'existe pas encore. SQLite ne crée JAMAIS le dossier parent tout
+# seul (seulement le fichier .db) : sans ce garde-fou, un DB_PATH
+# pointant vers un dossier absent provoque
+# "sqlite3.OperationalError: unable to open database file" — comme
+# rencontré lorsqu'un ancien RECON_DB_PATH (variable d'environnement
+# système périmée) pointait vers un dossier jamais créé sur cette
+# machine.
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir and not os.path.isdir(_db_dir):
+    try:
+        os.makedirs(_db_dir, exist_ok=True)
+        print(f"[config.py] Dossier créé pour la base SQLite : {_db_dir}")
+    except OSError as e:
+        print(f"[config.py] ATTENTION : impossible de créer le dossier '{_db_dir}' ({e}).")
 
 # Écriture SQLite par lots (to_sql) — utile sur gros extractions Flex.
 SQLITE_CHUNKSIZE = int(os.getenv("SQLITE_CHUNKSIZE", "2000"))
@@ -180,10 +237,17 @@ def make_oracle_engine():
         max_overflow=ORACLE_MAX_OVERFLOW,
         pool_recycle=ORACLE_POOL_RECYCLE,
         pool_timeout=ORACLE_POOL_TIMEOUT,
-        connect_args={
+
+        #connect_args={
             # cx_Oracle / oracledb : délai max pour ouvrir la session TCP.
-            "tcp_connect_timeout": ORACLE_CONNECT_TIMEOUT,
-        },
+           # "tcp_connect_timeout": ORACLE_CONNECT_TIMEOUT,
+         # }
+
+        connect_args={},
+
+
+
+
         # Hint SQLAlchemy (utile surtout si un dialcte le propage) ;
         # le vrai garde-fou requête est call_timeout ci-dessous.
         execution_options={"timeout": max(1, ORACLE_CALL_TIMEOUT_MS // 1000)},
@@ -371,7 +435,6 @@ COLONNES_AGENCE_RIA_AGENCE = {
     "col_credit": "Montant A Envoyé",   # <-> CREDIT (Flex)
     "col_debit": "Montant A Payé",      # <-> DEBIT (Flex)
 }
- 
 
 
 
@@ -398,11 +461,10 @@ PARTENAIRES = {
         # INCHANGÉ pour Wave (appariement par CODE_TRANSACTION, comme
         # avant ce correctif).
     },
-    
+
     #====================================USSSD TWO POINTERS
-    
-    
-    
+
+
 
     "ORANGE_AGENCE": {
         "label": "Orange Agence",
@@ -536,7 +598,7 @@ PARTENAIRES = {
 
 
 # ============================================================
-# À AJOUTER DANS config.py — Partenaire ORANGE_USSD
+# PARTENAIRE ORANGE_USSD
 # ------------------------------------------------------------
 # Mode "two_pointers" (comme Wave / Wizz) : le fichier USSD
 # Partenaire liste chaque transaction individuellement (pas un

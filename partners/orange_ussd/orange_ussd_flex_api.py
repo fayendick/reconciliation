@@ -23,62 +23,41 @@
 #
 # --------------------------------------------------------------
 # [CORRECTIF] INVERSION W2B/B2W (drcr_ind <-> Cash In/Cash Out) :
-#
-#   La première version supposait Cash In (W2B) = écriture CRÉDIT
-#   (drcr_ind='C') et Cash Out (B2W) = écriture DÉBIT (drcr_ind='D').
-#   L'analyse du résumé de réconciliation a montré que c'est
-#   l'INVERSE dans la réalité : pour une même transaction (même
-#   téléphone, même montant, même horodatage à la seconde près),
-#   le fichier Partenaire la classait en W2B pendant que Flex la
-#   classait en B2W (et réciproquement) -> comme le moteur ne
-#   compare jamais W2B-partenaire à B2W-flex (ce sont deux
-#   rapprochements séparés, un par sens), AUCUNE de ces transactions
-#   ne pouvait matcher, d'où un résultat quasi entièrement composé
-#   de "Non comptabilisée" / "Comptabilisation isolée".
-#
-#   Corrigé en inversant à la fois :
-#     - la colonne DRCR_IND qui alimente MOUVEMENT_DEBIT /
-#       MOUVEMENT_CREDIT (pas seulement le libellé TYPE_TRANSACTION),
-#       car reconciliation_engine.preparer_wave_flex applique
-#       toujours, de façon générique (partagée avec Wave, inchangée) :
-#           sens == "W2B" -> MONTANT_COMPARAISON = MOUVEMENT_CREDIT
-#           sens == "B2W" -> MONTANT_COMPARAISON = MOUVEMENT_DEBIT
-#       Inverser uniquement TYPE_TRANSACTION sans inverser aussi
-#       MOUVEMENT_DEBIT/MOUVEMENT_CREDIT aurait réglé le problème de
-#       "sens" mais cassé à nouveau la comparaison de montant (colonne
-#       vide comparée au montant réel).
-#     - le DECODE de TYPE_TRANSACTION en conséquence :
-#           drcr_ind = 'D' -> W2B  (au lieu de 'C' -> W2B)
-#           drcr_ind = 'C' -> B2W  (au lieu de 'D' -> B2W)
-#
-#   Aucun autre fichier n'est concerné par ce correctif (ni
-#   app_orange_ussd.py, ni reconciliation_engine.py, ni Wave/Wizz).
+#   (voir historique complet dans la version précédente du fichier —
+#   inchangé, non reproduit ici pour rester concis)
 # --------------------------------------------------------------
 #
-# CORRECTIONS PRÉCÉDENTES (déjà en place, inchangées) :
+# [CORRECTIF 2026-08-23] BUG "Query(379200000180) not supported" :
 #
-#   1. CODE_TRANSACTION_OPERATEUR = TRN_REF_NO CONFIRMÉ.
+#   CAUSE RÉELLE (confirmée via gateway/mount_partners.py) : les
+#   endpoints Flex sont invoqués EN PROCESS via call_partner_flex(),
+#   qui récupère la fonction Python brute derrière la route
+#   (route.endpoint) et l'appelle directement avec endpoint(**kwargs)
+#   — SANS jamais passer par le mécanisme ASGI / dependency-injection
+#   de FastAPI qui résout normalement Query(...) en sa vraie valeur.
 #
-#   2. Filtre d'exclusion des comptes internes/techniques :
-#         NVL(c.GL_DESC, s.AC_DESC) NOT IN (
-#             'COMPTES TTRANSFERT POUR VIREMENT INTERNE',
-#             'COMPTE ATTENTE ORANGE USSD',
-#             ' COMPTES DE LIAISON'
-#         )
+#   Conséquence : si l'appelant (gateway/reconc.py) ne fournit pas
+#   explicitement "compte_agent" dans les params transmis à
+#   call_partner_flex(), le paramètre reçoit la valeur par défaut
+#   LITTÉRALE du signature Python, qui était `Query(ORANGE_USSD_...)`
+#   — l'objet FastAPI lui-même — d'où l'erreur cx_Oracle
+#   "Python value of type Query not supported".
 #
-#   3. Filtre a.BATCH_NO IS NULL : exclut les écritures issues de
-#      traitements batch.
+#   -> FIX : le défaut de `compte_agent` n'utilise plus Query(...)
+#      mais une valeur Python simple (ORANGE_USSD_COMPTE_AGENT).
+#      Un défaut simple reste parfaitement valide pour FastAPI en
+#      cas de vrai appel HTTP (le paramètre reste bien un query
+#      param optionnel), et fonctionne aussi correctement en appel
+#      direct in-process comme le fait call_partner_flex().
+#      Seule la description OpenAPI (visible dans /docs) est perdue,
+#      ce qui est un compromis acceptable ici.
 #
-# --------------------------------------------------------------
-# ⚠️ RESTE À VÉRIFIER avant mise en prod (dépend du schéma réel côté métier) :
-#   - La liste d'exclusion des libellés GL (' COMPTES DE LIAISON' avec
-#     l'espace initial, orthographe 'TTRANSFERT') est reprise TELLE QUELLE
-#     de la requête de référence transmise. À confirmer qu'il n'y a pas
-#     de coquille côté source Oracle.
-#   - Chaîne de connexion Oracle : via make_oracle_engine() dans
-#     flex_common / config.py (même Flexcube / même instance
-#     "FCPRDSNPDB"). Si Orange USSD doit pointer vers une autre
-#     instance Oracle, ajuster ORACLE_* dans config / l'environnement.
+#   ⚠️ Le même risque existe potentiellement pour tout AUTRE
+#   paramètre optionnel à défaut Query(...) dans les autres modules
+#   *_flex_api.py (wave, wizz, ria_agence, wave_agence...) s'ils sont
+#   eux aussi invoqués via call_partner_flex() sans que reconc.py ne
+#   fournisse systématiquement toutes leurs clés optionnelles. À
+#   vérifier au cas par cas si un problème similaire réapparaît.
 # --------------------------------------------------------------
 
 import os
@@ -199,37 +178,59 @@ def _executer_requete(date_debut: date, date_fin: date, compte_agent: str) -> pd
     )
 
 
+def orange_ussd_flex_logique(
+    date_debut: str,
+    date_fin: Optional[str] = None,
+    compte_agent: str = ORANGE_USSD_COMPTE_AGENT,
+):
+    """Fonction métier PURE (aucune dépendance à fastapi.Query).
+
+    C'est la fonction à utiliser pour tout appel direct en Python
+    (ex: depuis gateway/reconc.py), afin de ne jamais recevoir un
+    objet Query() non résolu à la place d'une vraie valeur.
+    La route FastAPI ci-dessous n'est qu'un adaptateur HTTP autour
+    de cette fonction.
+    """
+    debut = _parser_date_fr(date_debut)
+    borne_fin = _parser_date_fr(date_fin) if date_fin else debut
+
+    df = _executer_requete(debut, borne_fin, compte_agent)
+    flex_w2b, flex_b2w = split_by_type_exact(df)
+
+    return save_split_w2b_b2w(
+        rt,
+        df,
+        sheets={
+            "ORANGE_USSD_FLEX": df,
+            "ORANGE_USSD_FLEX_W2B": flex_w2b,
+            "ORANGE_USSD_FLEX_B2W": flex_b2w,
+        },
+        filename="ORANGE_USSD_FLEX.xlsx",
+        format="json",
+        mode="exact",
+        json_payload={
+            "status": "ok",
+            "total": len(df),
+            "cash_in_w2b": len(flex_w2b),
+            "cash_out_b2w": len(flex_b2w),
+        },
+    )
+
+
 @app.get("/orange-ussd-flex")
 def orange_ussd_flex(
     date_debut: str = Query(..., description="Date de début (incluse), format DD/MM/YYYY"),
     date_fin: Optional[str] = Query(None, description="Date de fin (exclue). Par défaut date_debut + 1 jour, format DD/MM/YYYY"),
-    compte_agent: str = Query(ORANGE_USSD_COMPTE_AGENT, description="Compte GL agent Orange à interroger"),
+    # [CORRECTIF] défaut simple (pas Query(...)) : voir bloc de commentaire
+    # en tête de fichier — call_partner_flex() appelle cette fonction en
+    # process, en contournant la résolution FastAPI de Query(...).
+    compte_agent: str = ORANGE_USSD_COMPTE_AGENT,
 ):
+    """Route HTTP : extrait les paramètres de la requête via Query()
+    (résolus par FastAPI ici, dans le contexte d'un vrai appel ASGI),
+    puis délègue toute la logique à orange_ussd_flex_logique()."""
     try:
-        debut = _parser_date_fr(date_debut)
-        borne_fin = _parser_date_fr(date_fin) if date_fin else debut
-
-        df = _executer_requete(debut, borne_fin, compte_agent)
-        flex_w2b, flex_b2w = split_by_type_exact(df)
-
-        return save_split_w2b_b2w(
-            rt,
-            df,
-            sheets={
-                "ORANGE_USSD_FLEX": df,
-                "ORANGE_USSD_FLEX_W2B": flex_w2b,
-                "ORANGE_USSD_FLEX_B2W": flex_b2w,
-            },
-            filename="ORANGE_USSD_FLEX.xlsx",
-            format="json",
-            mode="exact",
-            json_payload={
-                "status": "ok",
-                "total": len(df),
-                "cash_in_w2b": len(flex_w2b),
-                "cash_out_b2w": len(flex_b2w),
-            },
-        )
+        return orange_ussd_flex_logique(date_debut, date_fin, compte_agent)
 
     except HTTPException:
         raise
