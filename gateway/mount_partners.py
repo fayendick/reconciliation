@@ -206,6 +206,45 @@ async def call_partner_upload(
     return await _ainvoke(endpoint, kwargs)
 
 
+def _unwrap_fastapi_default(default: Any) -> Any:
+    """Résout un défaut FastAPI Query()/Path()/... vers sa vraie valeur.
+
+    call_partner_* invoque les handlers EN PROCESS sans passer par
+    l'injection FastAPI : un défaut littéral `Query("x")` serait sinon
+    transmis tel quel à Oracle (cx_Oracle.NotSupportedError: type Query).
+    """
+    try:
+        from fastapi.params import Param
+    except ImportError:
+        return default
+
+    if isinstance(default, Param):
+        val = default.default
+        # Query(...) sans valeur = paramètre obligatoire, pas de défaut utilisable
+        if val is Ellipsis:
+            return inspect.Parameter.empty
+        return val
+    return default
+
+
+def _kwargs_for_endpoint(
+    endpoint: Any,
+    params: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Construit les kwargs d'appel in-process (params fournis + défauts résolus)."""
+    sig = inspect.signature(endpoint)
+    kwargs = {k: v for k, v in params.items() if k in sig.parameters}
+
+    for name, param in sig.parameters.items():
+        if name in kwargs or param.default is inspect.Parameter.empty:
+            continue
+        unwrapped = _unwrap_fastapi_default(param.default)
+        if unwrapped is not inspect.Parameter.empty:
+            kwargs[name] = unwrapped
+
+    return kwargs
+
+
 async def call_partner_flex(
     partenaire: str,
     params: Optional[Mapping[str, Any]] = None,
@@ -217,14 +256,6 @@ async def call_partner_flex(
 
     sub_app = _load_app(spec["flex_module"])
     endpoint = _find_endpoint(sub_app, spec["flex_path"])
-
-    params = dict(params or {})
-    # Ne passer que les kwargs acceptés par le handler
-    sig = inspect.signature(endpoint)
-    kwargs = {k: v for k, v in params.items() if k in sig.parameters}
-    # date_debut / date_fin souvent requis positionnellement via Query
-    for required in ("date_debut", "date_fin"):
-        if required in sig.parameters and required not in kwargs and required in params:
-            kwargs[required] = params[required]
+    kwargs = _kwargs_for_endpoint(endpoint, dict(params or {}))
 
     return await _ainvoke(endpoint, kwargs)

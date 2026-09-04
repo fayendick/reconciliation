@@ -213,7 +213,7 @@ def get_oracle_url() -> str:
     user = quote_plus(ORACLE_USER)
     password = quote_plus(ORACLE_PASSWORD)
     return (
-        f"oracle+cx_oracle://{user}:{password}"
+        f"oracle+oracledb://{user}:{password}"
         f"@{ORACLE_HOST}:{ORACLE_PORT}/?service_name={ORACLE_SERVICE_NAME}"
     )
 

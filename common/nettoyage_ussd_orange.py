@@ -34,6 +34,19 @@ import pandas as pd
 COLONNES_ATTENDUES_DEBUT = ["N°", "Date", "Heure", "Référence", "Service"]
 
 
+def _aperçu_fichier(raw: pd.DataFrame, max_lignes: int = 5) -> str:
+    """Résumé des premières lignes non vides — pour diagnostiquer un mauvais fichier."""
+    apercus = []
+    for _, row in raw.iterrows():
+        vals = [str(v).strip() for v in row.tolist() if pd.notna(v) and str(v).strip() not in ("", ".", "nan")]
+        if not vals:
+            continue
+        apercus.append(" | ".join(vals[:4]))
+        if len(apercus) >= max_lignes:
+            break
+    return " ; ".join(apercus) if apercus else "(fichier vide)"
+
+
 def _trouver_ligne_entete(raw: pd.DataFrame) -> int:
     """Retourne l'index de la ligne d'en-tête réelle du tableau
     (celle qui commence par N° / Date / Heure / Référence / Service)."""
@@ -43,9 +56,12 @@ def _trouver_ligne_entete(raw: pd.DataFrame) -> int:
         if valeurs == COLONNES_ATTENDUES_DEBUT:
             return i
 
+    apercu = _aperçu_fichier(raw)
     raise ValueError(
         "Ligne d'en-tête introuvable (attendu : N°, Date, Heure, Référence, "
-        "Service en début de ligne). Le format du fichier a peut-être changé."
+        "Service). Fichier attendu : Daily-ChannelUserTransactionReport-*.xls "
+        "(USSD Partenaire Orange Money). "
+        f"Aperçu reçu : {apercu}"
     )
 
 

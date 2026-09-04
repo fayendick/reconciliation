@@ -3,6 +3,8 @@
 *.pyc
 __pycache__/
 
+.venv/
+.venv_broken_windows/
 .venv_windows/
 venv/
 *.db
