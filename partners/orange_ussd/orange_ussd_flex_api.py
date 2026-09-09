@@ -89,6 +89,19 @@ TABLE_FLEX_B2W = TABLES["flex_b2w"]
 ORANGE_USSD_COMPTE_AGENT = os.getenv("ORANGE_USSD_COMPTE_AGENT", "379200000180")
 
 
+def _scalar_param(value, fallback=ORANGE_USSD_COMPTE_AGENT) -> str:
+    """Garantit une vraie str pour Oracle (jamais un objet FastAPI Query)."""
+    try:
+        from fastapi.params import Param
+        if isinstance(value, Param):
+            value = value.default
+    except ImportError:
+        pass
+    if value is None or value is Ellipsis:
+        value = fallback
+    return str(value).strip()
+
+
 SQL_ORANGE_USSD_FLEX = text("""
 WITH KYC AS (
     SELECT
@@ -171,7 +184,7 @@ def _executer_requete(date_debut: date, date_fin: date, compte_agent: str) -> pd
         rt,
         SQL_ORANGE_USSD_FLEX,
         {
-            "compte_agent": compte_agent,
+            "compte_agent": _scalar_param(compte_agent),
             "date_debut": datetime.combine(date_debut, datetime.min.time()),
             "date_fin": datetime.combine(date_fin, datetime.min.time()),
         },

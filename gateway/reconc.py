@@ -169,15 +169,61 @@ def cfg_or_400(partenaire: str) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def read_reconciliation_or_empty(table_name: str) -> pd.DataFrame:
+def _quote_ident(name: str) -> str:
+    """Identifiant SQL SQLite entre guillemets (colonnes avec espaces)."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def read_reconciliation_or_empty(
+    table_name: str,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
     """Comme read_table, mais renvoie un DataFrame vide (au lieu de lever
     une erreur 400) si la table n'existe pas encore — utile pour les
     endpoints de synthèse/graphe qu'on veut pouvoir appeler avant la
-    première réconciliation, sans faire planter la page Streamlit."""
+    première réconciliation, sans faire planter la page Streamlit.
+
+    Si `columns` est fourni, ne charge QUE ces colonnes (quand elles
+    existent), pour éviter de gonfler la RAM en prod sur les gros
+    Resultat_Global (cause principale de plantage au clic graphe)."""
     try:
-        return pd.read_sql(f"SELECT * FROM {table_name}", engine)
+        if columns:
+            try:
+                info = pd.read_sql(f"PRAGMA table_info({_quote_ident(table_name)})", engine)
+                disponibles = set(info["name"].tolist())
+            except Exception:
+                disponibles = set()
+            cols = [c for c in columns if c in disponibles]
+            if not cols:
+                return pd.DataFrame()
+            select = ", ".join(_quote_ident(c) for c in cols)
+            return pd.read_sql(
+                f"SELECT {select} FROM {_quote_ident(table_name)}",
+                engine,
+            )
+        return pd.read_sql(f"SELECT * FROM {_quote_ident(table_name)}", engine)
     except Exception:
         return pd.DataFrame()
+
+
+# Colonnes minimales par endpoint — évite SELECT * sur des tables prod volumineuses.
+_COLS_STATUT = ["STATUT"]
+_COLS_CARTE = [
+    "STATUT", "SENS",
+    "WP_DATE_HEURE", "WF_DATE_HEURE",
+    "WP_MONTANT_COMPARAISON", "WF_MONTANT_COMPARAISON",
+    "WP_TYPE TRANSACTION", "WF_TYPE_TRANSACTION",
+]
+_COLS_EVOLUTION = [
+    "SENS",
+    "WP_DATE_HEURE", "WF_DATE_HEURE",
+    "WP_MONTANT_COMPARAISON", "WF_MONTANT_COMPARAISON",
+    "WP_TYPE TRANSACTION", "WF_TYPE_TRANSACTION",
+]
+# Plafond d'affichage table résumé (évite de sérialiser 100k+ lignes en JSON).
+RESUME_AFFICHAGE_MAX = 2000
+# Plafond de points sur la courbe d'évolution (downsample si besoin).
+EVOLUTION_POINTS_MAX = 400
 
 
 def formater_nb(nb) -> str:
@@ -498,25 +544,54 @@ def get_reconciliation(partenaire: str = Query(...), limit: int = Query(None), o
 # ============================================================
 
 @app.get("/db/reconciliation-resume")
-def get_reconciliation_resume(partenaire: str = Query(...)):
+def get_reconciliation_resume(
+    partenaire: str = Query(...),
+    limit: int = Query(RESUME_AFFICHAGE_MAX, ge=1, le=50000),
+    offset: int = Query(0, ge=0),
+):
     """
     Renvoie le résultat de réconciliation aplati vers le schéma
     résumé : Type Transaction, Montant Partenaire, Montant Flex,
     Num_Tel_Client, Nom_Client, Compte, Agence, Ecart Montant,
     Diff Heure, Date Fichier Partenaire, Periode Fichier, Statut.
+
+    Plafonné côté SQL (LIMIT/OFFSET) pour ne pas saturer la RAM
+    en prod. En-tête X-Total-Count = total réel en base.
     """
     cfg = cfg_or_400(partenaire)
-    resultat = read_reconciliation_or_empty(cfg["tables"]["reconciliation"])
+    table = cfg["tables"]["reconciliation"]
 
-    if resultat.empty:
-        return []
+    try:
+        total = int(
+            pd.read_sql(
+                f"SELECT COUNT(*) AS c FROM {_quote_ident(table)}",
+                engine,
+            ).iloc[0]["c"]
+        )
+    except Exception:
+        return JSONResponse(content=[], headers={"X-Total-Count": "0"})
+
+    if total == 0:
+        return JSONResponse(content=[], headers={"X-Total-Count": "0"})
+
+    try:
+        resultat = pd.read_sql(
+            f"SELECT * FROM {_quote_ident(table)} LIMIT ? OFFSET ?",
+            engine,
+            params=(int(limit), int(offset)),
+        )
+    except Exception:
+        return JSONResponse(content=[], headers={"X-Total-Count": str(total)})
 
     resume = construire_table_resume(resultat, cfg.get("colonnes_resume", {}))
     for col in ["Periode Fichier", "Date Fichier Partenaire"]:
         if col in resume.columns:
             resume[col] = resume[col].astype(str)
 
-    return json.loads(resume.to_json(orient="records"))
+    return JSONResponse(
+        content=json.loads(resume.to_json(orient="records")),
+        headers={"X-Total-Count": str(total)},
+    )
 
 
 # ============================================================
@@ -531,7 +606,9 @@ def get_reconciliation_taux(partenaire: str = Query(...)):
     comptabilisations isolées et doublons inclus dans le total).
     """
     cfg = cfg_or_400(partenaire)
-    resultat = read_reconciliation_or_empty(cfg["tables"]["reconciliation"])
+    resultat = read_reconciliation_or_empty(
+        cfg["tables"]["reconciliation"], columns=_COLS_STATUT
+    )
     return calculer_taux_reussite(resultat)
 
 
@@ -540,7 +617,9 @@ def get_reconciliation_summary(partenaire: str = Query(...)):
     """Nombre de lignes par statut — TOUJOURS les 6 statuts de STATUTS,
     avec NB=0 pour ceux qui n'ont aucune ligne (table absente incluse)."""
     cfg = cfg_or_400(partenaire)
-    resultat = read_reconciliation_or_empty(cfg["tables"]["reconciliation"])
+    resultat = read_reconciliation_or_empty(
+        cfg["tables"]["reconciliation"], columns=_COLS_STATUT
+    )
     detail = calculer_taux_reussite(resultat)
     return [{"STATUT": s, "NB": detail["comptes"][s]} for s in STATUTS]
 
@@ -582,7 +661,9 @@ def get_reconciliation_summary(partenaire: str = Query(...)):
 def get_reconciliation_carte_resume(partenaire: str = Query(...)):
 
     cfg = cfg_or_400(partenaire)
-    resultat = read_reconciliation_or_empty(cfg["tables"]["reconciliation"])
+    resultat = read_reconciliation_or_empty(
+        cfg["tables"]["reconciliation"], columns=_COLS_CARTE
+    )
 
     if resultat.empty:
         return {
@@ -715,7 +796,9 @@ def get_reconciliation_carte_resume(partenaire: str = Query(...)):
 def get_reconciliation_graphe_statut(partenaire: str = Query(...)):
 
     cfg = cfg_or_400(partenaire)
-    resultat = read_reconciliation_or_empty(cfg["tables"]["reconciliation"])
+    resultat = read_reconciliation_or_empty(
+        cfg["tables"]["reconciliation"], columns=_COLS_STATUT
+    )
 
     detail = calculer_taux_reussite(resultat)
     comptes = detail["comptes"]
@@ -827,7 +910,9 @@ def get_reconciliation_graphe_evolution(
 ):
 
     cfg = cfg_or_400(partenaire)
-    resultat = read_reconciliation_or_empty(cfg["tables"]["reconciliation"])
+    resultat = read_reconciliation_or_empty(
+        cfg["tables"]["reconciliation"], columns=_COLS_EVOLUTION
+    )
 
     if resultat.empty:
         return JSONResponse(content=None)
@@ -878,6 +963,11 @@ def get_reconciliation_graphe_evolution(
         .sort_index()
     )
 
+    # Downsample si trop de buckets (évite de saturérer Plotly / le navigateur).
+    if len(evolution) > EVOLUTION_POINTS_MAX:
+        step = max(1, len(evolution) // EVOLUTION_POINTS_MAX)
+        evolution = evolution.iloc[::step]
+
     y_partenaire = evolution["PARTENAIRE"]
     y_flexcube = evolution["FLEXCUBE"]
 
@@ -893,6 +983,10 @@ def get_reconciliation_graphe_evolution(
     amplitude = max(float(y_partenaire.max() or 0), float(y_flexcube.max() or 0))
     decalage = amplitude * 0.004 if amplitude > 0 else 0.0
 
+    # Markers seulement si peu de points — sinon lignes seules (beaucoup
+    # plus léger pour le navigateur en prod).
+    mode_courbe = "lines+markers" if len(evolution) <= 120 else "lines"
+
     fig = go.Figure()
 
     fig.add_trace(
@@ -900,7 +994,7 @@ def get_reconciliation_graphe_evolution(
             x=evolution.index,
             y=y_partenaire + decalage,
             customdata=y_partenaire,
-            mode="lines+markers",
+            mode=mode_courbe,
             name="Partenaire",
             line=dict(color="#E53935", width=1.5),
             marker=dict(size=5),
@@ -913,7 +1007,7 @@ def get_reconciliation_graphe_evolution(
             x=evolution.index,
             y=y_flexcube - decalage,
             customdata=y_flexcube,
-            mode="lines+markers",
+            mode=mode_courbe,
             name="Flexcube",
             line=dict(color="#1565C0", width=1.5),
             marker=dict(size=5),

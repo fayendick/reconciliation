@@ -519,6 +519,17 @@ def safe_df(response):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _fetch_figure_json(endpoint: str, params_key: str):
+    """Cache le JSON Plotly côté Streamlit (évite de recharger la DB
+    à chaque clic / rerun — cause principale de plantage prod)."""
+    params = json.loads(params_key)
+    r = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=60)
+    if r.status_code != 200:
+        return {"ok": False, "status": r.status_code, "text": r.text, "data": None}
+    return {"ok": True, "status": 200, "text": "", "data": r.json()}
+
+
 def charger_figure(endpoint: str, params: dict, hauteur: int = None):
     """Récupère une figure Plotly déjà entièrement construite côté API
     (couleurs, légende, titre...) et la désérialise. Ne fait AUCUNE
@@ -526,16 +537,16 @@ def charger_figure(endpoint: str, params: dict, hauteur: int = None):
     Seul ajout : si `hauteur` est fourni, on ajuste UNIQUEMENT la
     hauteur d'affichage (update_layout)."""
     try:
-        r = requests.get(f"{API_BASE_URL}{endpoint}", params=params, timeout=30)
+        payload = _fetch_figure_json(endpoint, json.dumps(params, sort_keys=True))
     except Exception as e:
         st.error(f"Erreur chargement graphique : {e}")
         return None
 
-    if r.status_code != 200:
-        st.warning(r.text)
+    if not payload.get("ok"):
+        st.warning(payload.get("text") or "Erreur graphique")
         return None
 
-    data = r.json()
+    data = payload.get("data")
     if not data:
         return None
 
@@ -554,10 +565,19 @@ def charger_figure(endpoint: str, params: dict, hauteur: int = None):
 # par run_reconciliation).
 # ============================================================
 
+@st.fragment
 def afficher_graphes_reconciliation(partenaire, hauteur_graphe: int):
+    """Fragment isolé : changer le Sens W2B/B2W ne relance PAS toute
+    la page (carte + table résumé), ce qui saturait la RAM en prod."""
 
     st.markdown('<div class="carte-section">', unsafe_allow_html=True)
     col_gauche, col_droite = st.columns(2)
+
+    plotly_kwargs = dict(
+        use_container_width=True,
+        config={"displayModeBar": False},
+        on_select="ignore",
+    )
 
     with col_gauche:
         fig_statut = charger_figure(
@@ -566,7 +586,7 @@ def afficher_graphes_reconciliation(partenaire, hauteur_graphe: int):
             hauteur=hauteur_graphe,
         )
         if fig_statut:
-            st.plotly_chart(fig_statut, use_container_width=True)
+            st.plotly_chart(fig_statut, **plotly_kwargs)
         else:
             st.info("Aucune donnée de répartition disponible. Lance d'abord une réconciliation.")
 
@@ -582,12 +602,13 @@ def afficher_graphes_reconciliation(partenaire, hauteur_graphe: int):
             hauteur=hauteur_graphe,
         )
         if fig_evolution:
-            st.plotly_chart(fig_evolution, use_container_width=True)
+            st.plotly_chart(fig_evolution, **plotly_kwargs)
         else:
             st.info("Aucune donnée d'évolution disponible pour ce sens.")
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def charger_carte_resume(partenaire):
     """Récupère la carte résumé (HTML déjà entièrement construit et
     formaté côté API). Streamlit ne fait qu'un GET + affichage."""
@@ -595,7 +616,7 @@ def charger_carte_resume(partenaire):
         r = requests.get(
             f"{API_BASE_URL}/db/reconciliation-carte-resume",
             params={"partenaire": partenaire},
-            timeout=30
+            timeout=60
         )
         if r.status_code == 200:
             return r.json()
@@ -604,18 +625,35 @@ def charger_carte_resume(partenaire):
     return None
 
 
-def charger_table_resume(partenaire):
+@st.cache_data(ttl=120, show_spinner=False)
+def charger_table_resume(partenaire, limit: int = 2000):
     try:
         r = requests.get(
             f"{API_BASE_URL}/db/reconciliation-resume",
-            params={"partenaire": partenaire},
-            timeout=60
+            params={"partenaire": partenaire, "limit": limit, "offset": 0},
+            timeout=120
         )
         if r.status_code == 200:
-            return safe_df(r)
+            total = int(r.headers.get("X-Total-Count") or 0)
+            return safe_df(r), total
     except Exception:
         pass
-    return pd.DataFrame()
+    return pd.DataFrame(), 0
+
+
+def _marquer_resultat_pret(partenaire: str, nb_lignes: int | None = None):
+    """Marqueur léger en session — NE PAS stocker le DataFrame complet
+    (OOM en prod). Les graphes / carte / résumé viennent de l'API."""
+    st.session_state[f"recon_ready_{partenaire}"] = True
+    if nb_lignes is not None:
+        st.session_state[f"recon_nb_lignes_{partenaire}"] = nb_lignes
+
+
+def _resultat_est_pret(partenaire: str) -> bool:
+    return bool(
+        st.session_state.get(f"recon_ready_{partenaire}")
+        or f"recon_resultat_global_{partenaire}" in st.session_state
+    )
 
 
 # ============================================================
@@ -1088,12 +1126,26 @@ if tab3 is not None:
                 if response.status_code == 200:
                     st.success("Réconciliation terminée")
 
-                    recon_data = pd.read_excel(io.BytesIO(response.content), sheet_name=None)
-                    resultat_global = recon_data.get("Resultat_Global", pd.DataFrame())
+                    # Invalide les caches graphe/carte/résumé pour ce partenaire.
+                    _fetch_figure_json.clear()
+                    charger_carte_resume.clear()
+                    charger_table_resume.clear()
 
-                    st.session_state[f"recon_resultat_global_{PARTENAIRE}"] = resultat_global
-                    st.session_state[f"recon_sheets_{PARTENAIRE}"] = recon_data
+                    # Garde uniquement les bytes Excel pour le téléchargement
+                    # + l'onglet Doublons si présent. PAS le DataFrame complet
+                    # en session (OOM en prod au moindre rerun / clic graphe).
                     st.session_state[f"recon_excel_bytes_{PARTENAIRE}"] = response.content
+                    try:
+                        doublons = pd.read_excel(
+                            io.BytesIO(response.content), sheet_name="Doublon"
+                        )
+                        st.session_state[f"recon_doublons_{PARTENAIRE}"] = doublons
+                    except Exception:
+                        st.session_state.pop(f"recon_doublons_{PARTENAIRE}", None)
+
+                    st.session_state.pop(f"recon_resultat_global_{PARTENAIRE}", None)
+                    st.session_state.pop(f"recon_sheets_{PARTENAIRE}", None)
+                    _marquer_resultat_pret(PARTENAIRE)
                 else:
                     st.error(response.text)
 
@@ -1102,23 +1154,32 @@ if tab3 is not None:
 
         if recharger:
             try:
-                r = requests.get(f"{API_BASE_URL}/db/reconciliation", params={"partenaire": PARTENAIRE}, timeout=60)
-                resultat_global = safe_df(r)
+                # Ne charge PAS toute la table en session — juste vérifie
+                # qu'il y a des données via le summary (léger).
+                r = requests.get(
+                    f"{API_BASE_URL}/db/reconciliation-summary",
+                    params={"partenaire": PARTENAIRE},
+                    timeout=60,
+                )
+                summary_check = safe_df(r)
+                total = int(summary_check["NB"].sum()) if not summary_check.empty and "NB" in summary_check.columns else 0
 
-                if resultat_global.empty:
+                if total == 0:
                     st.warning("Aucun résultat de réconciliation trouvé en base pour ce partenaire. Lance d'abord une réconciliation.")
                 else:
-                    st.success(f"{len(resultat_global)} lignes rechargées depuis la base")
-                    st.session_state[f"recon_resultat_global_{PARTENAIRE}"] = resultat_global
+                    _fetch_figure_json.clear()
+                    charger_carte_resume.clear()
+                    charger_table_resume.clear()
+                    st.session_state.pop(f"recon_resultat_global_{PARTENAIRE}", None)
                     st.session_state.pop(f"recon_sheets_{PARTENAIRE}", None)
                     st.session_state.pop(f"recon_excel_bytes_{PARTENAIRE}", None)
+                    _marquer_resultat_pret(PARTENAIRE, nb_lignes=total)
+                    st.success(f"{total} lignes disponibles en base (affichage plafonné pour la stabilité)")
 
             except Exception as e:
                 st.error(f"Erreur rechargement : {e}")
 
-        if f"recon_resultat_global_{PARTENAIRE}" in st.session_state:
-
-            resultat_global = st.session_state[f"recon_resultat_global_{PARTENAIRE}"]
+        if _resultat_est_pret(PARTENAIRE):
 
             st.divider()
             afficher_graphes_reconciliation(PARTENAIRE, hauteur_graphe=HAUTEUR_GRAPHE)
@@ -1158,12 +1219,8 @@ if tab3 is not None:
                 summary = pd.DataFrame()
 
             if summary.empty:
-                comptes = (
-                    resultat_global["STATUT"].value_counts().to_dict()
-                    if "STATUT" in resultat_global.columns else {}
-                )
                 summary = pd.DataFrame(
-                    [{"STATUT": s, "NB": int(comptes.get(s, 0))} for s in STATUTS]
+                    [{"STATUT": s, "NB": 0} for s in STATUTS]
                 )
 
             cols = st.columns(len(summary))
@@ -1174,12 +1231,13 @@ if tab3 is not None:
 
             st.markdown("##### 📋 Table résumé")
 
-            table_resume = charger_table_resume(PARTENAIRE)
+            table_resume, total_resume = charger_table_resume(PARTENAIRE, limit=2000)
 
-            statuts_presents = (
-                set(resultat_global["STATUT"].dropna().unique().tolist())
-                if "STATUT" in resultat_global.columns else set()
-            )
+            statuts_presents = set()
+            if not summary.empty and "STATUT" in summary.columns and "NB" in summary.columns:
+                statuts_presents = set(
+                    summary.loc[summary["NB"] > 0, "STATUT"].tolist()
+                )
 
             statut_selection = st.multiselect(
                 "Filtrer par statut",
@@ -1206,13 +1264,17 @@ if tab3 is not None:
                 use_container_width=True,
                 height=HAUTEUR_TABLE,
             )
-            st.caption(f"{len(table_resume_filtree)} ligne(s) affichée(s) sur {len(table_resume)} au total")
+            total_affiche = total_resume or len(table_resume)
+            st.caption(
+                f"{len(table_resume_filtree)} ligne(s) affichée(s) "
+                f"(plafonnées à 2 000) — total en base : {total_affiche}"
+            )
 
-            recon_sheets = st.session_state.get(f"recon_sheets_{PARTENAIRE}")
-            if recon_sheets and "Doublon" in recon_sheets and not recon_sheets["Doublon"].empty:
+            doublons = st.session_state.get(f"recon_doublons_{PARTENAIRE}")
+            if doublons is not None and not getattr(doublons, "empty", True):
                 st.divider()
                 st.markdown("##### 🔴 Doublons détectés")
-                st.dataframe(recon_sheets["Doublon"], use_container_width=True)
+                st.dataframe(doublons, use_container_width=True)
 
             st.divider()
             if f"recon_excel_bytes_{PARTENAIRE}" in st.session_state:

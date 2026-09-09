@@ -70,6 +70,8 @@ PARTNER_ASGI: Dict[str, Dict[str, str]] = {
         "upload_path": "/process-excel",
         "flex_module": "partners.orange_ussd.orange_ussd_flex_api",
         "flex_path": "/orange-ussd-flex",
+        # Appel métier pur (pas la route FastAPI) — évite Query() non résolu.
+        "flex_fn": "orange_ussd_flex_logique",
     },
 }
 
@@ -254,8 +256,14 @@ async def call_partner_flex(
     if not spec:
         raise KeyError(f"Pas de cible ASGI flex pour {partenaire}")
 
-    sub_app = _load_app(spec["flex_module"])
-    endpoint = _find_endpoint(sub_app, spec["flex_path"])
-    kwargs = _kwargs_for_endpoint(endpoint, dict(params or {}))
+    mod = importlib.import_module(spec["flex_module"])
+    # Préférer une fonction métier pure si déclarée (ex. orange_ussd_flex_logique).
+    flex_fn = spec.get("flex_fn")
+    if flex_fn and hasattr(mod, flex_fn):
+        endpoint = getattr(mod, flex_fn)
+    else:
+        sub_app = getattr(mod, "app")
+        endpoint = _find_endpoint(sub_app, spec["flex_path"])
 
+    kwargs = _kwargs_for_endpoint(endpoint, dict(params or {}))
     return await _ainvoke(endpoint, kwargs)
