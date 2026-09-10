@@ -6,9 +6,15 @@ from sqlalchemy import text
 from common.flex_common import (
     bootstrap_flex_service,
     oracle_query,
-    save_split_w2b_b2w,
     split_by_dc,
 )
+
+from common.sqlite_io import (
+    ecrire_table,
+    creer_vues_split,
+)
+
+from common.http_export import respond_sheets
 
 
 # ============================================================
@@ -149,7 +155,7 @@ def preparer_niirpay_flex(df: pd.DataFrame) -> pd.DataFrame:
 
     IMPORTANT :
 
-    Le Gateway actuel traite NiirPay dans le flux W2B.
+    NiirPay est traité dans le flux B2W.
 
     Le moteur W2B compare :
         Excel.MONTANT
@@ -250,9 +256,7 @@ def preparer_niirpay_flex(df: pd.DataFrame) -> pd.DataFrame:
     #
     #     MOUVEMENT_CREDIT
     #
-    # Le flux NiirPay est actuellement chargé dans :
-    #
-    #     COMPILATION_NIIRPAY_W2B
+    # Le flux NiirPay est chargé dans le flux B2W.
     #
     # On met donc AMOUNT dans MOUVEMENT_CREDIT.
     #
@@ -260,9 +264,9 @@ def preparer_niirpay_flex(df: pd.DataFrame) -> pd.DataFrame:
     #
     # --------------------------------------------------------
 
-    df["MOUVEMENT_CREDIT"] = df["AMOUNT"]
+    df["MOUVEMENT_DEBIT"] = df["AMOUNT"]
 
-    df["MOUVEMENT_DEBIT"] = 0.0
+    df["MOUVEMENT_CREDIT"] = 0.0
 
     # --------------------------------------------------------
     # Type transaction
@@ -318,6 +322,95 @@ def preparer_niirpay_flex(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     return df
+
+
+# ============================================================
+# SAUVEGARDE FLEX NIIRPAY
+# ============================================================
+#
+# Le code commun utilise normalement :
+#
+#     D -> W2B
+#     C -> B2W
+#
+# Pour NiirPay :
+#
+#     Bank -> Wallet
+#     B2W
+#     Debit
+#     TYPE_TRANSACTION = D
+#
+# On ne modifie PAS le code commun.
+# NiirPay utilise ici ses propres vues :
+#
+#     D -> NIIRPAY_FLEX_B2W
+#     W2B -> vide
+#
+# ============================================================
+
+
+def sauvegarder_niirpay_flex(
+    df: pd.DataFrame,
+    debit_df: pd.DataFrame,
+    credit_df: pd.DataFrame,
+    *,
+    format: str = "excel",
+):
+    """
+    Sauvegarde le Flex NiirPay avec le mapping métier :
+
+        D -> B2W
+        C -> W2B
+    """
+
+    try:
+        # --------------------------------------------------------
+        # Table complète
+        # --------------------------------------------------------
+
+        ecrire_table(
+            df,
+            TABLES["flex"],
+            rt.sqlite,
+            log_prefix=rt.log_prefix,
+        )
+
+        # --------------------------------------------------------
+        # Vues W2B / B2W spécifiques à NiirPay
+        # --------------------------------------------------------
+
+        creer_vues_split(
+            rt.sqlite,
+            TABLES["flex"],
+            TABLES["flex_w2b"],
+            TABLES["flex_b2w"],
+            "1 = 0",
+            'UPPER(TRIM(CAST("TYPE_TRANSACTION" AS TEXT))) = \'D\'',
+            log_prefix=rt.log_prefix,
+        )
+
+        # --------------------------------------------------------
+        # Export
+        # --------------------------------------------------------
+
+        return respond_sheets(
+            {
+                "NIIRPAY_FLEX": df,
+                "NIIRPAY_FLEX_DEBIT": debit_df,
+                "NIIRPAY_FLEX_CREDIT": credit_df,
+            },
+            filename="NIIRPAY_FLEX.xlsx",
+            format=format,
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur sauvegarde/export Flex NiirPay : {e}",
+        )
 
 
 # ============================================================
@@ -428,15 +521,9 @@ def export_niirpay_flex(
     #
     # --------------------------------------------------------
 
-    return save_split_w2b_b2w(
-        rt,
+    return sauvegarder_niirpay_flex(
         df,
-        sheets={
-            "NIIRPAY_FLEX": df,
-            "NIIRPAY_FLEX_DEBIT": debit_df,
-            "NIIRPAY_FLEX_CREDIT": credit_df,
-        },
-        filename="NIIRPAY_FLEX.xlsx",
+        debit_df,
+        credit_df,
         format=format,
-        mode="dc",
     )
