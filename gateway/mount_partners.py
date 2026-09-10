@@ -31,6 +31,8 @@ PARTNER_MOUNTS: List[Tuple[str, str]] = [
     ("/svc/ria-agence-flex", "partners.ria_agence.RIA_agence_flex"),
     ("/svc/orange-ussd-excel", "partners.orange_ussd.app_orange_ussd"),
     ("/svc/orange-ussd-flex", "partners.orange_ussd.orange_ussd_flex_api"),
+    ("/svc/niirpay-excel", "partners.niirpay.app_niirpay"),
+    ("/svc/niirpay-flex", "partners.niirpay.niirpay_flex_api"),
 ]
 
 # Cibles pour /charger (module + chemin interne de la sous-app)
@@ -72,6 +74,12 @@ PARTNER_ASGI: Dict[str, Dict[str, str]] = {
         "flex_path": "/orange-ussd-flex",
         # Appel métier pur (pas la route FastAPI) — évite Query() non résolu.
         "flex_fn": "orange_ussd_flex_logique",
+    },
+        "NIIRPAY": {
+        "upload_module": "partners.niirpay.app_niirpay",
+        "upload_path": "/process-excel",
+        "flex_module": "partners.niirpay.niirpay_flex_api",
+        "flex_path": "/niirpay-flex",
     },
 }
 

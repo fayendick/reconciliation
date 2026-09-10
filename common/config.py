@@ -686,6 +686,41 @@ PARTENAIRES["ORANGE_USSD"] = {
 
 
 
+# ============================================================
+# PARTENAIRE NIIRPAY
+# ------------------------------------------------------------
+# NiirPay utilise le flux W2B dans le cadre de la réconciliation.
+# ============================================================
+
+PARTENAIRES["NIIRPAY"] = {
+    "label": "NiirPay",
+    "mode": MODE_TWO_POINTERS,
+    "upload_url": os.getenv(
+        "NIIRPAY_UPLOAD_URL",
+        f"{GATEWAY_BASE_URL}/svc/niirpay-excel/process-excel",
+    ),
+    "flex_url": os.getenv(
+        "NIIRPAY_FLEX_URL",
+        f"{GATEWAY_BASE_URL}/svc/niirpay-flex/niirpay-flex",
+    ),
+    "tables": {
+        "excel": "COMPILATION_NIIRPAY",
+        "excel_w2b": "COMPILATION_NIIRPAY_W2B",
+        "excel_b2w": "COMPILATION_NIIRPAY_B2W",
+        "flex": "NIIRPAY_FLEX",
+        "flex_w2b": "NIIRPAY_FLEX_W2B",
+        "flex_b2w": "NIIRPAY_FLEX_B2W",
+        "reconciliation": "RECONCILIATION_NIIRPAY",
+        "doublons": "DOUBLONS_NIIRPAY",
+    },
+    "colonnes_resume": {
+        "num_tel_client": None,
+        "nom_client": None,
+        "agence": "WF_LIBELLE_AGENCE",
+        "periode_fichier": "WF_DATE_VALEUR",
+    },
+}
+
 def get_partenaire(nom: str) -> dict:
     """Retourne la config d'un partenaire, lève une erreur explicite sinon.
 
