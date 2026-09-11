@@ -643,28 +643,27 @@ def separer_w2b_b2w(
     df: pd.DataFrame,
 ):
     """
-    NiirPay est actuellement traité comme W2B.
-
-    W2B :
-        toutes les transactions
+    NiirPay est traité comme B2W.
 
     B2W :
+        toutes les transactions
+
+    W2B :
         aucune transaction
     """
 
     df = df.copy()
 
-    df_w2b = df.copy()
-
-    df_b2w = df.iloc[
+    df_w2b = df.iloc[
         0:0
     ].copy()
+
+    df_b2w = df.copy()
 
     return (
         df_w2b,
         df_b2w,
     )
-
 
 # ============================================================
 # SAUVEGARDE SQLITE

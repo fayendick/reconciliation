@@ -456,36 +456,85 @@ def run_reconciliation(partenaire: str = Query(...)):
     wf_w2b_raw = read_table(t["flex_w2b"])
     wf_b2w_raw = read_table(t["flex_b2w"])
 
-    for nom, df in [
-        (f"Excel W2B ({partenaire})", wp_w2b_raw), (f"Excel B2W ({partenaire})", wp_b2w_raw),
-        (f"Flex W2B ({partenaire})", wf_w2b_raw), (f"Flex B2W ({partenaire})", wf_b2w_raw),
-    ]:
-        if df.empty:
-            raise HTTPException(
-                status_code=400,
-                detail=f"La table source '{nom}' est vide. "
-                        f"Lance le chargement Excel + Flex pour {partenaire} avant de réconcilier."
-            )
+    # --------------------------------------------------------
+    # Vérification des sources disponibles par sens.
+    #
+    # Certains partenaires peuvent fonctionner sur un seul sens
+    # (ex: NiirPay = B2W uniquement).
+    # On ne doit donc pas exiger W2B ET B2W.
+    # --------------------------------------------------------
 
-    # [CORRECTIF] False par défaut (clé absente pour Wave/Wizz) ->
-    # comportement historique inchangé. True uniquement pour
-    # ORANGE_USSD (voir config.py).
-    apparier_par_telephone_montant = cfg.get("apparier_par_telephone_montant", False)
+    w2b_disponible = not wp_w2b_raw.empty and not wf_w2b_raw.empty
+    b2w_disponible = not wp_b2w_raw.empty and not wf_b2w_raw.empty
+
+    # Un seul côté rempli = incohérence de chargement
+    if wp_w2b_raw.empty != wf_w2b_raw.empty:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Incohérence des sources W2B pour {partenaire} : "
+                f"Excel W2B = {len(wp_w2b_raw)} ligne(s), "
+                f"Flex W2B = {len(wf_w2b_raw)} ligne(s). "
+                f"Les deux côtés doivent être présents ou tous les deux vides."
+            ),
+        )
+
+    if wp_b2w_raw.empty != wf_b2w_raw.empty:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Incohérence des sources B2W pour {partenaire} : "
+                f"Excel B2W = {len(wp_b2w_raw)} ligne(s), "
+                f"Flex B2W = {len(wf_b2w_raw)} ligne(s). "
+                f"Les deux côtés doivent être présents ou tous les deux vides."
+            ),
+        )
+
+    if not w2b_disponible and not b2w_disponible:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Aucune donnée disponible pour la réconciliation de {partenaire}. "
+                f"Lance d'abord le chargement Excel + Flex."
+            ),
+        )
+
+    # [CORRECTIF] False par défaut pour Wave/Wizz.
+    # True uniquement pour ORANGE_USSD.
+    apparier_par_telephone_montant = cfg.get(
+        "apparier_par_telephone_montant",
+        False,
+    )
 
     try:
-        resultat_w2b = reconcilier_un_sens(
-            wp_w2b_raw, wf_w2b_raw, "W2B",
-            apparier_par_telephone_montant=apparier_par_telephone_montant,
-        )
-        resultat_w2b["SENS"] = "W2B"
+        resultats = []
 
-        resultat_b2w = reconcilier_un_sens(
-            wp_b2w_raw, wf_b2w_raw, "B2W",
-            apparier_par_telephone_montant=apparier_par_telephone_montant,
-        )
-        resultat_b2w["SENS"] = "B2W"
+        # W2B uniquement si les deux sources existent
+        if w2b_disponible:
+            resultat_w2b = reconcilier_un_sens(
+                wp_w2b_raw,
+                wf_w2b_raw,
+                "W2B",
+                apparier_par_telephone_montant=apparier_par_telephone_montant,
+            )
+            resultat_w2b["SENS"] = "W2B"
+            resultats.append(resultat_w2b)
 
-        resultat_final = pd.concat([resultat_w2b, resultat_b2w], ignore_index=True)
+        # B2W uniquement si les deux sources existent
+        if b2w_disponible:
+            resultat_b2w = reconcilier_un_sens(
+                wp_b2w_raw,
+                wf_b2w_raw,
+                "B2W",
+                apparier_par_telephone_montant=apparier_par_telephone_montant,
+            )
+            resultat_b2w["SENS"] = "B2W"
+            resultats.append(resultat_b2w)
+
+        resultat_final = pd.concat(
+            resultats,
+            ignore_index=True,
+        )
 
     except KeyError as e:
         raise HTTPException(
