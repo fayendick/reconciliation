@@ -721,6 +721,50 @@ PARTENAIRES["NIIRPAY"] = {
     },
 }
 
+# ============================================================
+# PARTENAIRE PI/SPI
+# ------------------------------------------------------------
+# CREDIT → W2B
+# DEBIT  → B2W
+# ============================================================
+
+PARTENAIRES["PISPI"] = {
+    "label": "PI/SPI",
+    "mode": MODE_TWO_POINTERS,
+    "apparier_par_compte_montant": True,
+    
+
+    "upload_url": os.getenv(
+        "PISPI_UPLOAD_URL",
+        f"{GATEWAY_BASE_URL}/svc/pispi-excel/process-excel",
+    ),
+
+    "flex_url": os.getenv(
+        "PISPI_FLEX_URL",
+        f"{GATEWAY_BASE_URL}/svc/pispi-flex/pispi-flex",
+    ),
+
+    "tables": {
+        "excel": "COMPILATION_PISPI",
+        "excel_w2b": "COMPILATION_PISPI_W2B",
+        "excel_b2w": "COMPILATION_PISPI_B2W",
+
+        "flex": "PISPI_FLEX",
+        "flex_w2b": "PISPI_FLEX_W2B",
+        "flex_b2w": "PISPI_FLEX_B2W",
+
+        "reconciliation": "RECONCILIATION_PISPI",
+        "doublons": "DOUBLONS_PISPI",
+    },
+
+    "colonnes_resume": {
+        "num_tel_client": None,
+        "nom_client": None,
+        "agence": "LIBELLE AGENCE",
+        "periode_fichier": "DATE_VALEUR",
+    },
+}
+
 def get_partenaire(nom: str) -> dict:
     """Retourne la config d'un partenaire, lève une erreur explicite sinon.
 
@@ -751,3 +795,6 @@ def get_mode(nom: str) -> str:
     avec repli sur 'two_pointers' si la clé est absente (compat
     ascendante pour un partenaire ajouté sans préciser 'mode')."""
     return get_partenaire(nom).get("mode", MODE_TWO_POINTERS)
+
+
+

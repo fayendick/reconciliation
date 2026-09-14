@@ -252,13 +252,32 @@ def preparer_wave_partenaire(df: pd.DataFrame, sens: str = None) -> pd.DataFrame
                 "(ex: Orange USSD Partenaire)."
             )
 
+    if "CODE_TRANSACTION" not in df.columns and "CODE TRANSACTION OPERATEUR" in df.columns:
+        df.rename(
+        columns={
+            "CODE TRANSACTION OPERATEUR": "CODE_TRANSACTION",
+        },
+        inplace=True,
+    )
+
+    if "NUMERO_COMPTE" not in df.columns and "NUMERO COMPTE" in df.columns:
         df.rename(
             columns={
-                "CODE TRANSACTION OPERATEUR": "CODE_TRANSACTION",
                 "NUMERO COMPTE": "NUMERO_COMPTE",
             },
             inplace=True,
         )
+
+    # --- comportement historique pour les anciens schémas ---
+    if "MONTANT_COMPARAISON" not in df.columns:
+        if "MONTANT" in df.columns:
+            df["MONTANT_COMPARAISON"] = df["MONTANT"]
+
+        if "DATE TRANSACTION" in df.columns and "DATE_HEURE" not in df.columns:
+            df["DATE_HEURE"] = pd.to_datetime(
+                df["DATE TRANSACTION"],
+                errors="coerce",
+            )
     else:
         # --- comportement historique, inchangé (Wave, Wizz, ...) ---
         df["DATE_HEURE"] = pd.to_datetime(df["DATE TRANSACTION"], errors="coerce")
@@ -305,11 +324,25 @@ def preparer_wave_partenaire(df: pd.DataFrame, sens: str = None) -> pd.DataFrame
 def preparer_wave_flex(df: pd.DataFrame, sens: str) -> pd.DataFrame:
 
     df = df.copy()
+    
+    # PI/SPI : Flex fournit le compte sous ACCOUNT_NO.
+    # Le moteur utilise NUMERO_COMPTE comme nom interne.
+    if "NUMERO_COMPTE" not in df.columns and "ACCOUNT_NO" in df.columns:
+        df["NUMERO_COMPTE"] = df["ACCOUNT_NO"]
 
     if "CODE_TRANSACTION" in df.columns:
         df.rename(columns={"CODE_TRANSACTION": "CODE_TRANSACTION_FLEX"}, inplace=True)
 
-    df["DATE_HEURE"] = pd.to_datetime(df["DATE_VALEUR"], errors="coerce")
+    if "SAVE_TIMESTAMP" in df.columns:
+        df["DATE_HEURE"] = pd.to_datetime(
+        df["SAVE_TIMESTAMP"],
+        errors="coerce"
+    )
+    else:
+        df["DATE_HEURE"] = pd.to_datetime(
+            df["DATE_VALEUR"],
+            errors="coerce"
+        )
 
     if sens == "W2B":
         df["MONTANT_COMPARAISON"] = df["MOUVEMENT_CREDIT"]
@@ -476,6 +509,7 @@ def reconciliation_two_pointers(
     tolerance_max_secondes: int = UNE_HEURE_EN_SECONDES * 24,
     fenetre_recherche: int = 150,
     apparier_par_telephone_montant: bool = False,
+    apparier_par_compte_montant: bool = False,
 ) -> pd.DataFrame:
     """
     tolerance_secondes     : au-delà de 0s et jusqu'à cette valeur (8s
@@ -543,7 +577,31 @@ def reconciliation_two_pointers(
             if diff_temps > tolerance_max_secondes:
                 continue
 
-            if apparier_par_telephone_montant:
+            if apparier_par_compte_montant:
+                # PI/SPI : compte + montant + date/heure.
+                # CODE_TRANSACTION n'est pas utilisé.
+                compte_wp = wp.get("NUMERO_COMPTE")
+                compte_wf = wf.get("NUMERO_COMPTE")
+
+                if pd.isna(compte_wp) or pd.isna(compte_wf):
+                    continue
+
+                if str(compte_wp).strip() != str(compte_wf).strip():
+                    continue
+
+                diff_montant_candidat = abs(
+                    wp["MONTANT_COMPARAISON"] - wf["MONTANT_COMPARAISON"]
+                )
+
+                if diff_montant_candidat != 0:
+                    continue
+
+                if diff_temps < meilleur_diff:
+                    meilleur = wf
+                    meilleur_idx = idx
+                    meilleur_diff = diff_temps
+
+            elif apparier_par_telephone_montant:
                 # [Orange USSD — CORRECTIF v3/v4/v5]
                 diff_montant_candidat = abs(
                     wp["MONTANT_COMPARAISON"] - wf["MONTANT_COMPARAISON"]
@@ -688,6 +746,7 @@ def reconcilier_un_sens(
     tolerance_max_secondes: int = UNE_HEURE_EN_SECONDES * 24,
     fenetre_recherche: int = 150,
     apparier_par_telephone_montant: bool = False,
+    apparier_par_compte_montant: bool = False,
 ) -> pd.DataFrame:
     """
     Enchaîne, pour un sens donné (W2B ou B2W) :
@@ -712,18 +771,47 @@ def reconcilier_un_sens(
     wp_prepare = nettoyer_montant(preparer_wave_partenaire(wp_raw, sens=sens))
     wf_prepare = nettoyer_montant(preparer_wave_flex(wf_raw, sens))
 
-    wp_dedup, wp_doublons = retirer_doublons(wp_prepare)
-    wf_dedup, wf_doublons = retirer_doublons(wf_prepare)
+    if apparier_par_compte_montant:
+        # PI/SPI : CODE_TRANSACTION n'est pas une clé comparable
+        # entre le fichier partenaire et Flex. La déduplication et
+        # le tri doivent donc utiliser uniquement les champs
+        # réellement communs : compte + date/heure + montant.
+        colonnes_doublons = [
+            "NUMERO_COMPTE",
+            "DATE_HEURE",
+            "MONTANT_COMPARAISON",
+        ]
 
-    wp_tri = trier(wp_dedup)
-    wf_tri = trier(wf_dedup)
+        wp_dedup, wp_doublons = retirer_doublons(
+            wp_prepare,
+            colonnes_cle=colonnes_doublons,
+        )
+        wf_dedup, wf_doublons = retirer_doublons(
+            wf_prepare,
+            colonnes_cle=colonnes_doublons,
+        )
+
+        wp_tri = wp_dedup.sort_values(
+            ["DATE_HEURE", "MONTANT_COMPARAISON"]
+        ).reset_index(drop=True)
+        wf_tri = wf_dedup.sort_values(
+            ["DATE_HEURE", "MONTANT_COMPARAISON"]
+        ).reset_index(drop=True)
+    else:
+        # Comportement historique inchangé pour les autres partenaires.
+        wp_dedup, wp_doublons = retirer_doublons(wp_prepare)
+        wf_dedup, wf_doublons = retirer_doublons(wf_prepare)
+
+        wp_tri = trier(wp_dedup)
+        wf_tri = trier(wf_dedup)
 
     resultat_appariement = reconciliation_two_pointers(
         wp_tri, wf_tri,
-        tolerance_secondes=tolerance_secondes,
+        tolerance_secondes=60 if apparier_par_compte_montant else tolerance_secondes,
         tolerance_max_secondes=tolerance_max_secondes,
         fenetre_recherche=fenetre_recherche,
         apparier_par_telephone_montant=apparier_par_telephone_montant,
+        apparier_par_compte_montant=apparier_par_compte_montant,
     )
 
     doublons_wp = _prefixer_doublons(wp_doublons, "WP")

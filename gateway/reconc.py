@@ -505,6 +505,11 @@ def run_reconciliation(partenaire: str = Query(...)):
         "apparier_par_telephone_montant",
         False,
     )
+    
+    apparier_par_compte_montant = cfg.get(
+    "apparier_par_compte_montant",
+    False,
+    ) 
 
     try:
         resultats = []
@@ -516,6 +521,7 @@ def run_reconciliation(partenaire: str = Query(...)):
                 wf_w2b_raw,
                 "W2B",
                 apparier_par_telephone_montant=apparier_par_telephone_montant,
+                apparier_par_compte_montant=apparier_par_compte_montant,
             )
             resultat_w2b["SENS"] = "W2B"
             resultats.append(resultat_w2b)
@@ -527,6 +533,7 @@ def run_reconciliation(partenaire: str = Query(...)):
                 wf_b2w_raw,
                 "B2W",
                 apparier_par_telephone_montant=apparier_par_telephone_montant,
+                apparier_par_compte_montant=apparier_par_compte_montant,
             )
             resultat_b2w["SENS"] = "B2W"
             resultats.append(resultat_b2w)
