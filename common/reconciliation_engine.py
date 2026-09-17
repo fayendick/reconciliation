@@ -252,32 +252,13 @@ def preparer_wave_partenaire(df: pd.DataFrame, sens: str = None) -> pd.DataFrame
                 "(ex: Orange USSD Partenaire)."
             )
 
-    if "CODE_TRANSACTION" not in df.columns and "CODE TRANSACTION OPERATEUR" in df.columns:
-        df.rename(
-        columns={
-            "CODE TRANSACTION OPERATEUR": "CODE_TRANSACTION",
-        },
-        inplace=True,
-    )
-
-    if "NUMERO_COMPTE" not in df.columns and "NUMERO COMPTE" in df.columns:
         df.rename(
             columns={
+                "CODE TRANSACTION OPERATEUR": "CODE_TRANSACTION",
                 "NUMERO COMPTE": "NUMERO_COMPTE",
             },
             inplace=True,
         )
-
-    # --- comportement historique pour les anciens schémas ---
-    if "MONTANT_COMPARAISON" not in df.columns:
-        if "MONTANT" in df.columns:
-            df["MONTANT_COMPARAISON"] = df["MONTANT"]
-
-        if "DATE TRANSACTION" in df.columns and "DATE_HEURE" not in df.columns:
-            df["DATE_HEURE"] = pd.to_datetime(
-                df["DATE TRANSACTION"],
-                errors="coerce",
-            )
     else:
         # --- comportement historique, inchangé (Wave, Wizz, ...) ---
         df["DATE_HEURE"] = pd.to_datetime(df["DATE TRANSACTION"], errors="coerce")
@@ -324,7 +305,7 @@ def preparer_wave_partenaire(df: pd.DataFrame, sens: str = None) -> pd.DataFrame
 def preparer_wave_flex(df: pd.DataFrame, sens: str) -> pd.DataFrame:
 
     df = df.copy()
-    
+
     # PI/SPI : Flex fournit le compte sous ACCOUNT_NO.
     # Le moteur utilise NUMERO_COMPTE comme nom interne.
     if "NUMERO_COMPTE" not in df.columns and "ACCOUNT_NO" in df.columns:
@@ -335,9 +316,9 @@ def preparer_wave_flex(df: pd.DataFrame, sens: str) -> pd.DataFrame:
 
     if "SAVE_TIMESTAMP" in df.columns:
         df["DATE_HEURE"] = pd.to_datetime(
-        df["SAVE_TIMESTAMP"],
-        errors="coerce"
-    )
+            df["SAVE_TIMESTAMP"],
+            errors="coerce"
+        )
     else:
         df["DATE_HEURE"] = pd.to_datetime(
             df["DATE_VALEUR"],
