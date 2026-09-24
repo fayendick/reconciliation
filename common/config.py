@@ -746,8 +746,8 @@ PARTENAIRES["PISPI"] = {
 
     "tables": {
         "excel": "COMPILATION_PISPI",
-        "excel_w2b": "COMPILATION_PISPI_W2B",
-        "excel_b2w": "COMPILATION_PISPI_B2W",
+        "excel_w2b": "PISPI_W2B",
+        "excel_b2w": "PISPI_B2W",
 
         "flex": "PISPI_FLEX",
         "flex_w2b": "PISPI_FLEX_W2B",

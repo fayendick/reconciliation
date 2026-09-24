@@ -1,47 +1,34 @@
-# ============================================================
-# PI/SPI — SERVICE EXCEL
-# ============================================================
+from __future__ import annotations
 
-import io
+import os
+import re
 import unicodedata
-from typing import List
+from typing import Any
 
 import pandas as pd
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 
-from fastapi import (
-    FastAPI,
-    UploadFile,
-    File,
-    HTTPException,
-    Query,
-)
-
-from common.config import (
-    DB_PATH,
-    PARTENAIRES,
-    make_sqlite_engine,
-)
-
+from config import DB_PATH, PARTENAIRES, make_sqlite_engine
 from common.excel_common import sauvegarder_sqlite
 from common.sqlite_io import lire_table_json
-from common.http_export import respond_sheets, wants_excel
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-PARTENAIRE = "PISPI"
+PARTENAIRE = "pispi"
 
-if PARTENAIRE not in PARTENAIRES:
-    raise RuntimeError(
-        f"Le partenaire '{PARTENAIRE}' n'existe pas dans "
-        f"common.config.PARTENAIRES."
-    )
+SHEET_PISPI = "Liste des transferts de fonds"
 
-TABLES = PARTENAIRES[PARTENAIRE]["tables"]
+TABLE_COMPILATION = "COMPILATION_PISPI"
+TABLE_W2B = "PISPI_W2B"
+TABLE_B2W = "PISPI_B2W"
 
-engine = make_sqlite_engine()
+# Statuts Excel autorisés
+STATUT_RECU = "RECU"
+STATUT_ENVOYE = "ENVOYE"
 
 
 # ============================================================
@@ -49,125 +36,178 @@ engine = make_sqlite_engine()
 # ============================================================
 
 app = FastAPI(
-    title="PI/SPI Excel API",
-    description=(
-        "Service de chargement et normalisation "
-        "des fichiers PI/SPI pour la réconciliation."
-    ),
+    title="PISPI Excel Service",
+    description="Service de traitement des fichiers PI/SPI",
+    version="1.0.0",
 )
+
+
+# ============================================================
+# MOTEUR SQLITE COMMUN
+# ============================================================
+
+engine = make_sqlite_engine()
 
 
 # ============================================================
 # OUTILS
 # ============================================================
 
-def normaliser_texte(valeur):
-    if valeur is None:
+def normaliser_texte(value: Any) -> str:
+    """
+    Normalise un texte :
+    - suppression des accents
+    - passage en majuscules
+    - suppression des espaces superflus
+    """
+    if value is None or pd.isna(value):
         return ""
 
-    try:
-        if pd.isna(valeur):
-            return ""
-    except Exception:
-        pass
+    value = str(value).strip()
 
-    texte = str(valeur).strip().upper()
-
-    texte = unicodedata.normalize(
-        "NFKD",
-        texte,
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(
+        c
+        for c in value
+        if not unicodedata.combining(c)
     )
 
-    texte = "".join(
-        caractere
-        for caractere in texte
-        if not unicodedata.combining(caractere)
-    )
+    value = value.upper()
 
-    return " ".join(texte.split())
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
 
 
-def trouver_colonne(df, candidats):
-
-    if df is None or df.empty:
-        return None
-
-    mapping = {}
+def trouver_colonne(df: pd.DataFrame, nom_recherche: str) -> str | None:
+    """
+    Recherche une colonne en ignorant :
+    - accents
+    - majuscules/minuscules
+    - espaces superflus
+    """
+    cible = normaliser_texte(nom_recherche)
 
     for colonne in df.columns:
-
-        mapping[
-            normaliser_texte(colonne)
-        ] = colonne
-
-    for candidat in candidats:
-
-        cle = normaliser_texte(candidat)
-
-        if cle in mapping:
-            return mapping[cle]
+        if normaliser_texte(colonne) == cible:
+            return colonne
 
     return None
 
 
+def normaliser_compte(value: Any) -> str:
+    """
+    Conserve le numéro de compte sous forme de texte.
+
+    Gère notamment le cas où Excel transforme un compte
+    numérique en valeur du type 123456.0.
+    """
+    if value is None or pd.isna(value):
+        return ""
+
+    # Cas numérique
+    if isinstance(value, (int, float)):
+        try:
+            if float(value).is_integer():
+                return str(int(value))
+        except Exception:
+            pass
+
+    valeur = str(value).strip()
+
+    # Cas Excel : "123456.0"
+    if valeur.endswith(".0"):
+        partie = valeur[:-2]
+
+        if partie.isdigit():
+            return partie
+
+    return valeur
+
+
+def convertir_montant(value: Any):
+    """
+    Convertit correctement les montants Excel en numérique.
+
+    Gère notamment :
+    - 1000
+    - 1000.50
+    - 1000,50
+    - 1 000,50
+    - 1.000,50
+    """
+    if value is None or pd.isna(value):
+        return pd.NA
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    valeur = str(value).strip()
+
+    if not valeur:
+        return pd.NA
+
+    valeur = valeur.replace("\u00A0", "")
+    valeur = valeur.replace(" ", "")
+
+    # Présence simultanée de . et ,
+    if "," in valeur and "." in valeur:
+
+        # Exemple européen : 1.234,56
+        if valeur.rfind(",") > valeur.rfind("."):
+            valeur = valeur.replace(".", "")
+            valeur = valeur.replace(",", ".")
+
+        # Exemple anglo-saxon : 1,234.56
+        else:
+            valeur = valeur.replace(",", "")
+
+    elif "," in valeur:
+        # Exemple : 1234,56
+        valeur = valeur.replace(",", ".")
+
+    return pd.to_numeric(valeur, errors="coerce")
+
+
 # ============================================================
-# LECTURE FICHIER PI/SPI
+# LECTURE DU FICHIER EXCEL
 # ============================================================
 
-def lire_fichier_pispi(upload_file):
+def lire_fichier_pispi(fichier: str) -> pd.DataFrame:
+    """
+    Lecture du nouvel onglet PI/SPI :
 
-    contenu = upload_file.file.read()
+    Liste des transferts de fonds
+    """
 
-    if not contenu:
-        raise ValueError(
-            "Le fichier PI/SPI est vide."
+    if not os.path.exists(fichier):
+        raise FileNotFoundError(
+            f"Fichier introuvable : {fichier}"
         )
 
-    excel = pd.ExcelFile(
-        io.BytesIO(contenu)
+    print(
+        f"[PISPI] Lecture du fichier : {fichier}"
     )
 
-    feuille_detail = None
-
-    for feuille in excel.sheet_names:
-
-        if normaliser_texte(feuille) == normaliser_texte(
-            "Détail Compensation"
-        ):
-            feuille_detail = feuille
-            break
-
-    if feuille_detail is None:
-
-        raise ValueError(
-            "La feuille 'Détail Compensation' "
-            "n'a pas été trouvée. "
-            f"Feuilles disponibles : {excel.sheet_names}"
+    try:
+        df = pd.read_excel(
+            fichier,
+            sheet_name=SHEET_PISPI,
+            header=0,
         )
+    except ValueError as exc:
+        raise ValueError(
+            f"Onglet '{SHEET_PISPI}' introuvable dans le fichier."
+        ) from exc
 
-    df = pd.read_excel(
-        io.BytesIO(contenu),
-        sheet_name=feuille_detail,
-        header=1,
+    print(
+        f"[PISPI] Onglet '{SHEET_PISPI}' : "
+        f"{len(df)} lignes"
     )
 
-    df.columns = [
-        str(colonne).strip()
-        for colonne in df.columns
-    ]
-
-    df = df.dropna(
-        axis=1,
-        how="all",
-    )
-
-    df = df.dropna(
-        axis=0,
-        how="all",
-    )
-
-    df = df.reset_index(
-        drop=True
+    print(
+        f"[PISPI] Colonnes détectées : "
+        f"{df.columns.tolist()}"
     )
 
     return df
@@ -177,197 +217,323 @@ def lire_fichier_pispi(upload_file):
 # TRAITEMENT PI/SPI
 # ============================================================
 
-def traiter_pispi(upload_file):
+def traiter_pispi(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Transforme le nouveau format PI/SPI vers le format
+    exploitable par le rapprochement commun.
 
-    df = lire_fichier_pispi(
-        upload_file
-    )
+    Correspondances :
+
+    Date
+        -> date
+
+    Référence
+        -> REFERENCETRANSACTION
+
+    REÇU / réception :
+        Compte du payé
+            -> NUMERO_COMPTE
+
+    ENVOYÉ / envoi :
+        Compte du payeur
+            -> NUMERO_COMPTE
+
+    Montant
+        -> montant
+
+    REÇU
+        -> CREDIT
+        -> W2B
+
+    ENVOYÉ
+        -> DEBIT
+        -> B2W
+    """
+
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=[
+                "REFERENCETRANSACTION",
+                "NUMERO_COMPTE",
+                "CLIENT_PAYE",
+                "montant",
+                "MONTANT",
+                "date",
+                "DATE TRANSACTION",
+                "SENS",
+                "TYPE_TRANSACTION",
+                "TYPE TRANSACTION",
+            ]
+        )
+
+    df = df.copy()
 
     # --------------------------------------------------------
-    # RECHERCHE DES COLONNES
+    # Colonnes obligatoires
     # --------------------------------------------------------
 
-    col_reference = trouver_colonne(
-        df,
-        [
-            "Référence",
-            "Reference",
-        ],
-    )
+    colonnes_requises = [
+        "Date",
+        "Référence",
+        "Compte du payeur",
+        "Compte du payé",
+        "Client payé",
+        "Montant",
+        "Statut",
+    ]
 
-    col_sens = trouver_colonne(
-        df,
-        [
-            "Sens compensation",
-            "Sens",
-            "Statut",
-        ],
-    )
+    colonnes = {}
 
-    col_montant = trouver_colonne(
-        df,
-        [
-            "Montant",
-        ],
-    )
+    for nom in colonnes_requises:
+        colonne = trouver_colonne(df, nom)
 
-    col_date = trouver_colonne(
-        df,
-        [
-            "Date irrévocabilité",
-            "Date irrevocabilite",
-            "Date",
-        ],
-    )
-    
-    col_compte = trouver_colonne(
-        df,
-        [
-            "Numero de compte du client",
-            "Numéro de compte du client",
-        ],
-    )
-
-    colonnes_manquantes = []
-
-    if col_reference is None:
-        colonnes_manquantes.append(
-            "Référence"
-        )
-
-    if col_sens is None:
-        colonnes_manquantes.append(
-            "Sens compensation"
-        )
-
-    if col_montant is None:
-        colonnes_manquantes.append(
-            "Montant"
-        )
-
-    if col_date is None:
-        colonnes_manquantes.append(
-            "Date irrévocabilité"
-        )
-    if col_compte is None:
-            colonnes_manquantes.append(
-            "Numero de compte du client"
-        )
-
-    if colonnes_manquantes:
-
-        raise ValueError(
-            "Colonnes PI/SPI manquantes : "
-            + ", ".join(
-                colonnes_manquantes
+        if colonne is None:
+            raise ValueError(
+                f"Colonne obligatoire absente : '{nom}'. "
+                f"Colonnes disponibles : {df.columns.tolist()}"
             )
+
+        colonnes[nom] = colonne
+
+    print(
+        "[PISPI] Colonnes utilisées : "
+        f"Date='{colonnes['Date']}', "
+        f"Référence='{colonnes['Référence']}', "
+        f"Compte du payeur='{colonnes['Compte du payeur']}', "
+        f"Compte du payé='{colonnes['Compte du payé']}', "
+        f"Montant='{colonnes['Montant']}', "
+        f"Statut='{colonnes['Statut']}'"
+    )
+
+    # --------------------------------------------------------
+    # Normalisation du statut
+    # --------------------------------------------------------
+
+    df["_STATUT_NORMALISE"] = (
+        df[colonnes["Statut"]]
+        .apply(normaliser_texte)
+    )
+
+    nb_avant = len(df)
+
+    # IMPORTANT :
+    # On garde uniquement les opérations réussies
+    # REÇU / ENVOYÉ
+    df = df[
+        df["_STATUT_NORMALISE"].isin(
+            [STATUT_RECU, STATUT_ENVOYE]
+        )
+    ].copy()
+
+    print(
+        f"[PISPI] Filtre opérations : "
+        f"{nb_avant} avant / {len(df)} après"
+    )
+
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "REFERENCETRANSACTION",
+                "NUMERO_COMPTE",
+                "CLIENT_PAYE",
+                "montant",
+                "MONTANT",
+                "date",
+                "DATE TRANSACTION",
+                "SENS",
+                "TYPE_TRANSACTION",
+                "TYPE TRANSACTION",
+            ]
         )
 
     # --------------------------------------------------------
-    # FORMAT STANDARD
+    # Référence
     # --------------------------------------------------------
 
     df["REFERENCETRANSACTION"] = (
-    df[col_reference]
-    .astype(str)
-    .str.strip()
+        df[colonnes["Référence"]]
+        .apply(
+            lambda x: ""
+            if pd.isna(x)
+            else str(x).strip()
+        )
     )
 
-    # Éviter le conflit SQLite entre "Montant" et "montant"
-    if col_montant == "Montant":
-        df = df.rename(
-            columns={
-                col_montant: "Montant_Excel"
-            }
-        )
-        col_montant = "Montant_Excel"
+    # --------------------------------------------------------
+    # COMPTE UTILISÉ POUR LE RAPPROCHEMENT
+    #
+    # REÇU / réception -> Compte du payé
+    # ENVOYÉ / envoi    -> Compte du payeur
+    #
+    # Cette règle est spécifique à PI/SPI.
+    # --------------------------------------------------------
 
-    df["MONTANT"] = pd.to_numeric(
-        df[col_montant],
-        errors="coerce",
-    ).abs()
+    df["NUMERO_COMPTE"] = ""
+
+    masque_recu = df["_STATUT_NORMALISE"] == STATUT_RECU
+    masque_envoye = df["_STATUT_NORMALISE"] == STATUT_ENVOYE
+
+    df.loc[masque_recu, "NUMERO_COMPTE"] = (
+        df.loc[masque_recu, colonnes["Compte du payé"]]
+        .apply(normaliser_compte)
+    )
+
+    df.loc[masque_envoye, "NUMERO_COMPTE"] = (
+        df.loc[masque_envoye, colonnes["Compte du payeur"]]
+        .apply(normaliser_compte)
+    )
+
+    # --------------------------------------------------------
+    # CLIENT PAYÉ
+    # --------------------------------------------------------
+
+    df["CLIENT_PAYE"] = (
+        df[colonnes["Client payé"]]
+        .apply(normaliser_texte)
+    )
+
+    # --------------------------------------------------------
+    # MONTANT
+    # --------------------------------------------------------
+
+    df["montant"] = (
+        df[colonnes["Montant"]]
+        .apply(convertir_montant)
+    )
+
+    # --------------------------------------------------------
+    # DATE / HEURE
+    # --------------------------------------------------------
 
     df["date"] = pd.to_datetime(
-        df[col_date],
+        df[colonnes["Date"]],
         errors="coerce",
+        dayfirst=True,
     )
 
     # --------------------------------------------------------
     # SENS
-    #
-    # REÇU   → CREDIT → W2B
-    # ENVOYE → DEBIT  → B2W
     # --------------------------------------------------------
 
-    df["SENS"] = (
-        df[col_sens]
-        .apply(normaliser_texte)
-        .map(
-            {
-                "RECU": "CREDIT",
-                "ENVOYE": "DEBIT",
-                "CREDIT": "CREDIT",
-                "DEBIT": "DEBIT",
-            }
-        )
-    )
-
-    # --------------------------------------------------------
-    # TYPE TRANSACTION
-    #
-    # CREDIT → W2B
-    # DEBIT  → B2W
-    # --------------------------------------------------------
-
-    df["TYPE_TRANSACTION"] = df[
-        "SENS"
-    ].map(
+    df["SENS"] = df["_STATUT_NORMALISE"].map(
         {
-            "CREDIT": "C",
-            "DEBIT": "D",
+            STATUT_RECU: "CREDIT",
+            STATUT_ENVOYE: "DEBIT",
         }
     )
 
     # --------------------------------------------------------
-    # NETTOYAGE
+    # TYPE DE TRANSACTION
     # --------------------------------------------------------
 
-    df = df.dropna(
-        subset=[
-            "REFERENCETRANSACTION",
-            "MONTANT",
-            "date",
-            "SENS",
-        ]
-    ).copy()
-
-    df = df.sort_values(
-        by="date"
-    ).reset_index(
-        drop=True
+    df["TYPE_TRANSACTION"] = df["SENS"].map(
+        {
+            "CREDIT": "W2B",
+            "DEBIT": "B2W",
+        }
     )
-     
-    
-    # ========================================================
-    # Colonnes standard attendues par le moteur de réconciliation
-    # ========================================================
 
+    # Alias attendu par le moteur commun
+    df["TYPE TRANSACTION"] = df["TYPE_TRANSACTION"]
+
+    # --------------------------------------------------------
+    # Nettoyage
+    #
+    # La référence n'est PAS utilisée comme clé
+    # de rapprochement.
+    #
+    # Donc une référence vide ne doit pas supprimer
+    # une transaction valide.
+    # --------------------------------------------------------
+
+    df["NUMERO_COMPTE"] = (
+        df["NUMERO_COMPTE"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    df["REFERENCETRANSACTION"] = (
+        df["REFERENCETRANSACTION"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    df["montant"] = pd.to_numeric(
+        df["montant"],
+        errors="coerce",
+    )
+
+    df["date"] = pd.to_datetime(
+        df["date"],
+        errors="coerce",
+    )
+
+    # Pour le rapprochement, ces trois informations sont
+    # nécessaires :
+    # - compte
+    # - montant
+    # - date
+    df = df[
+        (df["NUMERO_COMPTE"] != "")
+        & df["montant"].notna()
+        & df["date"].notna()
+    ].copy()
+
+    # --------------------------------------------------------
+    # Colonnes finales
+    #
+    # Les colonnes "montant" et "date" sont conservées pour
+    # l'exploitation PI/SPI.
+    #
+    # Les alias sont ajoutés pour respecter le format attendu
+    # par le moteur commun de réconciliation.
+    # --------------------------------------------------------
+
+    df["MONTANT"] = df["montant"]
+    df["MONTANT_COMPARAISON"] = df["montant"]
     df["DATE TRANSACTION"] = df["date"]
 
-    df["TYPE TRANSACTION"] = df["SENS"].map({
-        "CREDIT": "W2B",
-        "DEBIT": "B2W",
-    })
+    colonnes_finales = [
+        "REFERENCETRANSACTION",
+        "NUMERO_COMPTE",
+        "CLIENT_PAYE",
+        "montant",
+        "MONTANT",
+        "MONTANT_COMPARAISON",
+        "date",
+        "DATE TRANSACTION",
+        "SENS",
+        "TYPE_TRANSACTION",
+        "TYPE TRANSACTION",
+    ]
 
-    df["CODE TRANSACTION OPERATEUR"] = df["REFERENCETRANSACTION"]
-    df["CODE_TRANSACTION"] = df["REFERENCETRANSACTION"]
+    df = df[colonnes_finales].copy()
 
-    df["NUMERO COMPTE"] = df[col_compte]
+    # --------------------------------------------------------
+    # Tri
+    # --------------------------------------------------------
 
-    
-     
-    
-    
+    df = df.sort_values(
+        by="date",
+        kind="stable",
+    ).reset_index(drop=True)
+
+    print(
+        f"[PISPI] Transactions finales : {len(df)}"
+    )
+
+    print(
+        "[PISPI] Répartition SENS :\n"
+        f"{df['SENS'].value_counts(dropna=False).to_string()}"
+    )
+
+    print(
+        "[PISPI] Répartition TYPE_TRANSACTION :\n"
+        f"{df['TYPE_TRANSACTION'].value_counts(dropna=False).to_string()}"
+    )
+
     return df
 
 
@@ -375,58 +541,137 @@ def traiter_pispi(upload_file):
 # SEPARATION W2B / B2W
 # ============================================================
 
-def separer_w2b_b2w(df):
+def separer_w2b_b2w(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
 
-    df = df.copy()
+    if df is None or df.empty:
+        return (
+            df.copy(),
+            df.copy(),
+        )
 
-    # CREDIT → W2B
-    df_w2b = df[
-        df["SENS"] == "CREDIT"
+    w2b = df[
+        df["TYPE_TRANSACTION"] == "W2B"
     ].copy()
 
-    # DEBIT → B2W
-    df_b2w = df[
-        df["SENS"] == "DEBIT"
+    b2w = df[
+        df["TYPE_TRANSACTION"] == "B2W"
     ].copy()
 
-    return (
-        df_w2b,
-        df_b2w,
+    print(
+        f"[PISPI] W2B / CREDIT : {len(w2b)}"
     )
+
+    print(
+        f"[PISPI] B2W / DEBIT : {len(b2w)}"
+    )
+
+    return w2b, b2w
+
+
+# ============================================================
+# SECURITE AVANT SQLITE
+# ============================================================
+
+def supprimer_doublons_colonnes_sqlite(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Sécurité supplémentaire contre les collisions de noms
+    SQLite, par exemple :
+
+        Date
+        date
+
+    ou :
+
+        Montant
+        montant
+    """
+
+    if df is None or df.empty:
+        return df
+
+    colonnes_vues = set()
+    colonnes_a_garder = []
+
+    for colonne in df.columns:
+
+        cle = str(colonne).strip().lower()
+
+        if cle in colonnes_vues:
+            print(
+                f"[PISPI] Colonne supprimée avant SQLite : "
+                f"{colonne}"
+            )
+            continue
+
+        colonnes_vues.add(cle)
+        colonnes_a_garder.append(colonne)
+
+    return df.loc[:, colonnes_a_garder].copy()
 
 
 # ============================================================
 # SAUVEGARDE SQLITE
 # ============================================================
 
-def sauvegarder_pispi(df):
+def sauvegarder_pispi(
+    df: pd.DataFrame,
+) -> dict[str, Any]:
 
-    df_w2b, df_b2w = separer_w2b_b2w(
-        df
+    if df is None:
+        df = pd.DataFrame()
+
+    df = supprimer_doublons_colonnes_sqlite(df)
+
+    w2b, b2w = separer_w2b_b2w(df)
+
+    print(
+        f"[PISPI] Sauvegarde {TABLE_COMPILATION} : "
+        f"{len(df)} lignes"
     )
 
     sauvegarder_sqlite(
         df,
-        TABLES["excel"],
+        TABLE_COMPILATION,
         engine,
+        log_prefix="PISPI",
+    )
+
+    print(
+        f"[PISPI] Sauvegarde {TABLE_W2B} : "
+        f"{len(w2b)} lignes"
     )
 
     sauvegarder_sqlite(
-        df_w2b,
-        TABLES["excel_w2b"],
+        w2b,
+        TABLE_W2B,
         engine,
+        log_prefix="PISPI",
+    )
+
+    print(
+        f"[PISPI] Sauvegarde {TABLE_B2W} : "
+        f"{len(b2w)} lignes"
     )
 
     sauvegarder_sqlite(
-        df_b2w,
-        TABLES["excel_b2w"],
+        b2w,
+        TABLE_B2W,
         engine,
+        log_prefix="PISPI",
     )
 
-    return (
-        df_w2b,
-        df_b2w,
-    )
+    return {
+        "table_compilation": TABLE_COMPILATION,
+        "table_w2b": TABLE_W2B,
+        "table_b2w": TABLE_B2W,
+        "nb_total": len(df),
+        "nb_w2b": len(w2b),
+        "nb_b2w": len(b2w),
+    }
 
 
 # ============================================================
@@ -435,146 +680,189 @@ def sauvegarder_pispi(df):
 
 @app.post("/process-excel")
 async def process_excel(
-    files: List[UploadFile] = File(...),
-    format: str = Query(
-        "excel",
-        description="excel ou json",
-    ),
+    fichier: UploadFile = File(...),
 ):
+    """
+    Endpoint appelé par le gateway.
 
-    if not files:
+    Exemple :
+        /svc/pispi-excel/process-excel
+    """
 
+    nom_fichier = fichier.filename or "pispi.xlsx"
+
+    if not nom_fichier.lower().endswith(
+        (".xlsx", ".xls")
+    ):
         raise HTTPException(
             status_code=400,
-            detail="Aucun fichier PI/SPI fourni.",
+            detail="Le fichier doit être un fichier Excel (.xlsx ou .xls).",
         )
 
-    resultats = []
-    erreurs = []
+    chemin_temporaire = os.path.join(
+        "data",
+        f"_pispi_{nom_fichier}",
+    )
 
-    # --------------------------------------------------------
-    # TRAITEMENT DES FICHIERS
-    # --------------------------------------------------------
+    os.makedirs(
+        "data",
+        exist_ok=True,
+    )
 
-    for fichier in files:
+    try:
+
+        # ----------------------------------------------------
+        # Sauvegarde temporaire
+        # ----------------------------------------------------
+
+        contenu = await fichier.read()
+
+        with open(
+            chemin_temporaire,
+            "wb",
+        ) as f:
+            f.write(contenu)
+
+        print(
+            f"[PISPI] Fichier reçu : {nom_fichier}"
+        )
+
+        # ----------------------------------------------------
+        # Lecture
+        # ----------------------------------------------------
+
+        df_brut = lire_fichier_pispi(
+            chemin_temporaire
+        )
+
+        # ----------------------------------------------------
+        # Transformation
+        # ----------------------------------------------------
+
+        df_final = traiter_pispi(
+            df_brut
+        )
+
+        # ----------------------------------------------------
+        # Sauvegarde SQLite
+        # ----------------------------------------------------
+
+        sauvegarde = sauvegarder_pispi(
+            df_final
+        )
+
+        # ----------------------------------------------------
+        # Réponse
+        # ----------------------------------------------------
+
+        return JSONResponse(
+            content={
+                "success": True,
+                "partenaire": PARTENAIRE,
+                "fichier": nom_fichier,
+                "onglet": SHEET_PISPI,
+                "nb_lignes_brutes": len(df_brut),
+                "nb_lignes_finales": len(df_final),
+                "nb_w2b": sauvegarde["nb_w2b"],
+                "nb_b2w": sauvegarde["nb_b2w"],
+                "tables": {
+                    "compilation": TABLE_COMPILATION,
+                    "w2b": TABLE_W2B,
+                    "b2w": TABLE_B2W,
+                },
+            }
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+
+        print(
+            f"[PISPI] ERREUR : {exc}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    finally:
+
+        # ----------------------------------------------------
+        # Suppression du fichier temporaire
+        # ----------------------------------------------------
 
         try:
-
-            df = traiter_pispi(
-                fichier
+            if os.path.exists(
+                chemin_temporaire
+            ):
+                os.remove(
+                    chemin_temporaire
+                )
+        except Exception as exc:
+            print(
+                f"[PISPI] Impossible de supprimer "
+                f"le fichier temporaire : {exc}"
             )
-
-            resultats.append(
-                df
-            )
-
-        except Exception as erreur:
-
-            erreurs.append(
-                {
-                    "fichier": fichier.filename,
-                    "erreur": str(erreur),
-                }
-            )
-
-    if not resultats:
-
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": (
-                    "Aucun fichier PI/SPI "
-                    "n'a pu être traité."
-                ),
-                "erreurs": erreurs,
-            },
-        )
-
-    # --------------------------------------------------------
-    # CONSOLIDATION
-    # --------------------------------------------------------
-
-    df_final = pd.concat(
-        resultats,
-        ignore_index=True,
-    )
-
-    # --------------------------------------------------------
-    # SAUVEGARDE
-    # --------------------------------------------------------
-
-    df_w2b, df_b2w = sauvegarder_pispi(
-        df_final
-    )
-
-    # --------------------------------------------------------
-    # RETOUR
-    # --------------------------------------------------------
-
-    sheets = {
-        "PISPI": df_final,
-        "PISPI_W2B": df_w2b,
-        "PISPI_B2W": df_b2w,
-    }
-
-    if format.lower() == "json":
-
-        return {
-            "status": "ok",
-            "format": "json",
-            "filename": "PISPI.xlsx",
-            "fichiers": [
-                fichier.filename
-                for fichier in files
-            ],
-            "nb_fichiers": len(
-                resultats
-            ),
-            "nb_transactions": len(
-                df_final
-            ),
-            "nb_w2b": len(
-                df_w2b
-            ),
-            "nb_b2w": len(
-                df_b2w
-            ),
-            "erreurs": erreurs,
-        }
-
-    return respond_sheets(
-        sheets,
-        filename="PISPI.xlsx",
-        format=format,
-    )
 
 
 # ============================================================
-# ROUTES SQLITE
+# LECTURE SQLITE
 # ============================================================
 
 @app.get("/db/pispi")
-def db_pispi():
-
-    return lire_table_json(
-        DB_PATH,
-        TABLES["excel"],
-    )
+def get_pispi():
+    try:
+        return lire_table_json(
+            engine,
+            TABLE_COMPILATION,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
 
 @app.get("/db/pispi-w2b")
-def db_pispi_w2b():
-
-    return lire_table_json(
-        DB_PATH,
-        TABLES["excel_w2b"],
-    )
+def get_pispi_w2b():
+    try:
+        return lire_table_json(
+            engine,
+            TABLE_W2B,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
 
 @app.get("/db/pispi-b2w")
-def db_pispi_b2w():
+def get_pispi_b2w():
+    try:
+        return lire_table_json(
+            engine,
+            TABLE_B2W,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
 
-    return lire_table_json(
-        DB_PATH,
-        TABLES["excel_b2w"],
-    )
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "pispi-excel",
+        "partenaire": PARTENAIRE,
+        "sheet": SHEET_PISPI,
+        "database": DB_PATH,
+    }

@@ -39,535 +39,167 @@ TABLES = rt.tables
 def get_pispi_flex(
     date_debut: str,
     date_fin: str,
-    compte: str,
 ) -> pd.DataFrame:
 
+    # ========================================================
+    # REQUETE PI/SPI — CONSERVEE TELLE QUE FOURNIE
+    # ========================================================
     sql = text("""
-        WITH Journal AS (
-
-            SELECT
-                TRN_REF_NO,
-                AC_ENTRY_SR_NO,
-                EVENT_SR_NO,
-                EVENT,
-                AC_BRANCH,
-                AC_NO,
-                AC_CCY,
-                CATEGORY,
-                DRCR_IND,
-                TRN_CODE,
-                FCY_AMOUNT,
-                EXCH_RATE,
-                LCY_AMOUNT,
-                VALUE_DT AS TRN_DT,
-                VALUE_DT,
-                TXN_INIT_DATE,
-                AMOUNT_TAG,
-                RELATED_ACCOUNT,
-                RELATED_CUSTOMER,
-                RELATED_REFERENCE,
-                MIS_HEAD,
-                MIS_FLAG,
-                INSTRUMENT_CODE,
-                BANK_CODE,
-                BALANCE_UPD,
-                AUTH_STAT,
-                MODULE,
-                CUST_GL,
-                DLY_HIST,
-                FINANCIAL_CYCLE,
-                PERIOD_CODE,
-                BATCH_NO,
-                USER_ID,
-                CURR_NO,
-                PRINT_STAT,
-                AUTH_ID,
-                GLMIS_VAL_UPD_FLAG,
-                EXTERNAL_REF_NO,
-                DONT_SHOWIN_STMT,
-                IC_BAL_INCLUSION,
-                AML_EXCEPTION,
-                IB,
-                GLMIS_UPDATE_FLAG,
-                PRODUCT_ACCRUAL,
-                ORIG_PNL_GL,
-                STMT_DT,
-                ENTRY_SEQ_NO,
-                VIRTUAL_AC_NO,
-                CLAIM_AMOUNT,
-                GRP_REF_NO,
-                SAVE_TIMESTAMP,
-                AUTH_TIMESTAMP,
-                PRODUCT_PROCESSOR,
-                RELATED_AC_ENTRY_SR_NO,
-                DONT_SHOWIN_STMT_FEE,
-                ORG_SOURCE,
-                ORG_SOURCE_REF,
-                SOURCE_CODE
-
-            FROM CFSFCUBS145.ACVW_ALL_AC_ENTRIES
-
-            WHERE MODULE = 'DE'
-
-
-            UNION
-
-
-            SELECT
-                TRN_REF_NO,
-                AC_ENTRY_SR_NO,
-                EVENT_SR_NO,
-                EVENT,
-                AC_BRANCH,
-                AC_NO,
-                AC_CCY,
-                CATEGORY,
-                DRCR_IND,
-                TRN_CODE,
-                FCY_AMOUNT,
-                EXCH_RATE,
-                LCY_AMOUNT,
-                TRN_DT,
-                VALUE_DT,
-                TXN_INIT_DATE,
-                AMOUNT_TAG,
-                RELATED_ACCOUNT,
-                RELATED_CUSTOMER,
-                RELATED_REFERENCE,
-                MIS_HEAD,
-                MIS_FLAG,
-                INSTRUMENT_CODE,
-                BANK_CODE,
-                BALANCE_UPD,
-                AUTH_STAT,
-                MODULE,
-                CUST_GL,
-                DLY_HIST,
-                FINANCIAL_CYCLE,
-                PERIOD_CODE,
-                BATCH_NO,
-                USER_ID,
-                CURR_NO,
-                PRINT_STAT,
-                AUTH_ID,
-                GLMIS_VAL_UPD_FLAG,
-                EXTERNAL_REF_NO,
-                DONT_SHOWIN_STMT,
-                IC_BAL_INCLUSION,
-                AML_EXCEPTION,
-                IB,
-                GLMIS_UPDATE_FLAG,
-                PRODUCT_ACCRUAL,
-                ORIG_PNL_GL,
-                STMT_DT,
-                ENTRY_SEQ_NO,
-                VIRTUAL_AC_NO,
-                CLAIM_AMOUNT,
-                GRP_REF_NO,
-                SAVE_TIMESTAMP,
-                AUTH_TIMESTAMP,
-                PRODUCT_PROCESSOR,
-                RELATED_AC_ENTRY_SR_NO,
-                DONT_SHOWIN_STMT_FEE,
-                ORG_SOURCE,
-                ORG_SOURCE_REF,
-                SOURCE_CODE
-
-            FROM CFSFCUBS145.ACVW_ALL_AC_ENTRIES
-
-            WHERE MODULE <> 'DE'
-        )
-
-
-        SELECT
-
-            /* ==================================================
-               REFERENCE
-               ================================================== */
-
-            o.REFERENCETRANSACTION
-                AS "REFERENCETRANSACTION",
-
-            a.TRN_REF_NO
-                AS "TRN_REF_NO",
-
-
-            /* ==================================================
-               NUMERO ERC
-               ================================================== */
-
-            a.AC_ENTRY_SR_NO
-                AS "NO_ERC",
-
-
-            /* ==================================================
-               GL / DESCRIPTION
-               ================================================== */
-
-            NVL(
-                c.GL_CODE,
-                s.DR_GL
-            ) AS "PARENT_GL",
-
-            NVL(
-                c.GL_DESC,
-                s.AC_DESC
-            ) AS "DESCRIPTION",
-
-
-            /* ==================================================
-               AGENCE
-               ================================================== */
-
-            a.AC_BRANCH
-                AS "CODE AGENCE",
-
-            b.BRANCH_NAME
-                AS "LIBELLE AGENCE",
-
-
-            /* ==================================================
-               DEBIT
-               ================================================== */
-
-            DECODE(
-                a.DRCR_IND,
-                'D',
-                a.LCY_AMOUNT,
-                0
-            ) AS "Debit",
-
-
-            /* ==================================================
-               CREDIT
-               ================================================== */
-
-            DECODE(
-                a.DRCR_IND,
-                'C',
-                a.LCY_AMOUNT,
-                0
-            ) AS "Credit",
-
-
-            /* ==================================================
-               SENS
-               ================================================== */
-
-            a.DRCR_IND
-                AS "SENS",
-
-
-            /* ==================================================
-               STATUT PI
-               ================================================== */
-
-            o.STATUSFINAL
-                AS "STATUSFINAL",
-
-
-            /* ==================================================
-               DATES
-               ================================================== */
-
-            a.TRN_DT
-                AS "DATE_SAISIE",
-
-            a.VALUE_DT
-                AS "DATE_VALEUR",
-
-
-            /* ==================================================
-               UTILISATEURS
-               ================================================== */
-
-            a.USER_ID
-                AS "UTIL SAISI",
-
-            a.AC_NO
-                AS "ACCOUNT_NO",
-
-            a.AUTH_ID
-                AS "UTIL VALID",
-
-
-            /* ==================================================
-               INFORMATIONS TRANSACTION
-               ================================================== */
-
-            a.BATCH_NO,
-
-            a.TRN_CODE,
-
-
-            /* ==================================================
-               LIBELLE OPERATION
-               ================================================== */
-
-            NVL(
-                (
-                    SELECT
-                        u.ADDL_TEXT
-
-                    FROM CFSFCUBS145.DETB_UPLOAD_DETAIL u
-
-                    WHERE
-                        u.BATCH_NO = a.BATCH_NO
-
-                        AND u.ACCOUNT = a.AC_NO
-
-                        AND u.VALUE_DATE = a.VALUE_DT
-
-                        AND u.AMOUNT = a.LCY_AMOUNT
-
-                        AND a.CURR_NO = u.CURR_NO
-                ),
-                t.TRN_DESC
-            ) AS "LIBELLE_OPER",
-
-
-            /* ==================================================
-               DESCRIPTION BATCH
-               ================================================== */
-
-            NVL(
-                od.ADDL_TEXT,
-                NVL(
-                    xx.ADDL_TEXT,
-                    d.DESCRIPTION
-                )
-            ) AS "DESCRIPTION BATCH",
-
-
-            /* ==================================================
-               INFORMATIONS CLIENT
-               ================================================== */
-
-            a.RELATED_CUSTOMER
-                AS "MATRICULE_CLIENT",
-
-            a.RELATED_CUSTOMER
-                AS "MATRICULE_CLIENT_ORACLE",
-
-
-            /* ==================================================
-               COMPTE CLIENT
-               ================================================== */
-
-            a.RELATED_ACCOUNT
-                AS "COMPTE_CLIENT",
-
-            a.RELATED_ACCOUNT
-                AS "COMPTE_ASSOCIES",
-
-
-            /* ==================================================
-               COMPTE NAFA
-               ================================================== */
-
-            s.ALT_AC_NO
-                AS "COMPTE_NAFA",
-
-            s.ALT_AC_NO
-                AS "ACCOUNT_NAFA",
-
-
-            /* ==================================================
-               NOM / PRENOM CLIENT
-               ================================================== */
-
-            NVL(
-                c.GL_DESC,
-                s.AC_DESC
-            ) AS "NOM_PRENOM_CLIENT",
-
-
-            /* ==================================================
-               AUTRES INFORMATIONS
-               ================================================== */
-
-            a.EVENT
-                AS "EVENEMENT",
-
-            a.AMOUNT_TAG
-                AS "ETIQUETTE",
-
-            a.SAVE_TIMESTAMP
-
-        FROM Journal a
-
-
-        /* ======================================================
-           PITRANSACTION
-           ====================================================== */
-
-        LEFT JOIN (
-
-            SELECT
-                NCPDEBITEUR,
-                REFERENCETRANSACTION,
-                STATUSFINAL
-
-            FROM (
-
-                SELECT
-                    p.NCPDEBITEUR,
-                    p.REFERENCETRANSACTION,
-                    p.STATUSFINAL,
-
-                    ROW_NUMBER() OVER (
-                        PARTITION BY p.NCPDEBITEUR
-                        ORDER BY p.DATETRANS DESC
-                    ) AS rn
-
-                FROM OMB_SN.PITRANSACTION p
-
-                WHERE p.STATUSFINAL = 'SUCCESSFUL'
-            )
-
-            WHERE rn = 1
-
-        ) o
-
-            ON o.NCPDEBITEUR = a.AC_NO
-
-
-        /* ======================================================
-           GL MASTER
-           ====================================================== */
-
-        LEFT JOIN CFSFCUBS145.GLTM_GLMASTER c
-
-            ON c.GL_CODE = a.AC_NO
-
-
-        /* ======================================================
-           COMPTE CLIENT
-           ====================================================== */
-
-        LEFT JOIN CFSFCUBS145.STTM_CUST_ACCOUNT s
-
-            ON s.CUST_AC_NO = a.AC_NO
-
-
-        /* ======================================================
-           CODE TRANSACTION
-           ====================================================== */
-
-        LEFT JOIN CFSFCUBS145.STTM_TRN_CODE t
-
-            ON t.TRN_CODE = a.TRN_CODE
-
-
-        /* ======================================================
-           AGENCE
-           ====================================================== */
-
-        LEFT JOIN CFSFCUBS145.STTM_BRANCH b
-
-            ON b.BRANCH_CODE = a.AC_BRANCH
-
-
-        /* ======================================================
-           DETAIL JOURNAL
-           ====================================================== */
-
-        LEFT JOIN CFSFCUBS145.DETBS_JRNL_TXN_DETAIL xx
-
-            ON a.TRN_REF_NO = xx.REFERENCE_NO
-
-            AND a.EVENT_SR_NO = xx.SERIAL_NO
-
-
-        /* ======================================================
-           BATCH
-           ====================================================== */
-
-        LEFT JOIN CFSFCUBS145.DETB_BATCH_MASTER d
-
-            ON a.BATCH_NO = d.BATCH_NO
-
-            AND a.AC_BRANCH = d.BRANCH_CODE
-
-
-        /* ======================================================
-           UPLOAD DETAIL
-           ====================================================== */
-
-        LEFT JOIN CFSFCUBS145.DETB_UPLOAD_DETAIL od
-
-            ON od.BATCH_NO = a.BATCH_NO
-
-            AND a.AC_BRANCH = od.ACCOUNT_BRANCH
-
-            AND a.CURR_NO = od.CURR_NO
-
-
-        /* ======================================================
-           FILTRE COMPTE SUSPENSE
-           ====================================================== */
-
-        WHERE A.TRN_REF_NO IN (
-
-            SELECT
-                TRN_REF_NO
-
-            FROM CFSFCUBS145.ACVW_ALL_AC_ENTRIES
-
-            WHERE AC_NO = :compte
-        )
-
-
-        /* ======================================================
-           DATE DEBUT INCLUSE
-           ====================================================== */
-
-        AND a.SAVE_TIMESTAMP >= :date_debut
-
-
-        /* ======================================================
-           DATE FIN EXCLUE
-           ====================================================== */
-
-        AND a.SAVE_TIMESTAMP < :date_fin
-
-
-        /* ======================================================
-           UNIQUEMENT PI SUCCESSFUL
-           ====================================================== */
-
-        AND o.STATUSFINAL = 'SUCCESSFUL'
-
-
-        ORDER BY
-            a.VALUE_DT DESC
+    with PI_ENTRANT_SORTANT as (
+
+/* =======================
+   PI SORTANT
+   ======================= */
+SELECT 
+    a.AC_ENTRY_SR_NO,
+    i.MONTANTTRANSFERT       AS MONTANT,
+    a.AC_NO        AS NUMCPT,
+    i.TXNREFNO,
+    a.RELATED_CUSTOMER,
+    a.DRCR_IND,
+    a.TRN_DT,
+    ( SELECT 'Transfert PI SPI' || ' vers ' || NOMPAYE
+        FROM CFSFCUBS145.STTM_CUST_ACCOUNT
+       WHERE CUST_AC_NO = i.NCPDEBITEUR
+    ) AS DESC_OPS,
+    i.FEES         AS FRAIS
+FROM OMB_SN.PITRANSACTION i, CFSFCUBS145.ACVW_ALL_AC_ENTRIES  a
+WHERE i.TXNREFNO = a.EXTERNAL_REF_NO
+  AND a.AC_NO = i.NCPDEBITEUR
+  AND i.SENS = 'D'
+  and a.TRN_DT between to_date(:date_debut, 'YYYY-MM-DD')
+                 and to_date(:date_fin, 'YYYY-MM-DD')
+  
+  
+  
+  
+ 
+UNION ALL
+ 
+/* =======================
+   PI ENTRANT
+   ======================= */
+SELECT 
+    a.AC_ENTRY_SR_NO,
+    i.MONTANTTRANSFERT       AS MONTANT,
+    a.AC_NO        AS NUMCPT,
+    i.TXNREFNO,
+    a.RELATED_CUSTOMER ,
+    a.DRCR_IND,
+    a.TRN_DT,
+    ( SELECT 'Transfert PI SPI' || ' reçu de ' || NOMPAYEUR
+        FROM CFSFCUBS145.STTM_CUST_ACCOUNT
+       WHERE CUST_AC_NO = i.NCPDEBITEUR
+    ) AS DESC_OPS,
+    i.FEES         AS FRAIS
+FROM OMB_SN.PITRANSACTION i, CFSFCUBS145.ACVW_ALL_AC_ENTRIES a
+WHERE i.TXNREFNO = a.EXTERNAL_REF_NO
+  AND a.AC_NO = i.COMPTEPAYE
+  AND i.SENS = 'C'
+  and a.TRN_DT between to_date(:date_debut, 'YYYY-MM-DD')
+                 and to_date(:date_fin, 'YYYY-MM-DD')
+ 
+ 
+
+  
+  ),
+  
+  
+  KYC AS ( 
+
+    SELECT 
+
+        sc.CUSTOMER_NO,
+
+        cat.CUST_CAT_DESC ,
+        DECODE(sc.CUSTOMER_TYPE, 'C', 'ENTREPRISE', 'I', 'PARTICULIER')  as CUSTOMER_TYPE
+
+    FROM CFSFCUBS145.STTM_CUSTOMER sc
+
+    LEFT JOIN CFSFCUBS145.STTM_CUSTOMER_CAT cat 
+    
+        ON cat.CUST_CAT = sc.CUSTOMER_CATEGORY
+     LEFT JOIN CFSFCUBS145.STTM_CUST_PERSONAL p 
+        ON sc.CUSTOMER_NO = p.CUSTOMER_NO
+    
+    ),
+    PI_FINAL as (
+    select 
+
+    kyc.CUST_CAT_DESC,
+    kyc.CUSTOMER_TYPE ,
+    pi.* 
+
+    from PI_ENTRANT_SORTANT  pi
+
+    left join KYC kyc on kyc.CUSTOMER_NO= pi.RELATED_CUSTOMER
+    ),
+
+    ecriture as (
+    SELECT
+    A.AC_NO,
+    cpt.AC_DESC as NOM_CLIENT,
+    A.TRN_REF_NO,
+    A.EXTERNAL_REF_NO as REF_PI,
+    A.LCY_AMOUNT,
+    A.TRN_DT,
+    A.SAVE_TIMESTAMP
+    FROM
+    CFSFCUBS145.ACVW_ALL_AC_ENTRIES A
+    JOIN CFSFCUBS145.STTM_CUST_ACCOUNT CPT ON A.AC_NO = CPT.CUST_AC_NO
+    JOIN CFSFCUBS145.STTM_ACCOUNT_CLASS CL ON CPT.ACCOUNT_CLASS = CL.ACCOUNT_CLASS
+    WHERE
+    CL.ACCOUNT_CODE IN ('251' ,'253')
+    ),
+
+    STATUT_TRANSACTION_PI as ( 
+    select ni.TXNREFNO,
+    e.LCY_AMOUNT,
+    e.NOM_CLIENT,
+    e.SAVE_TIMESTAMP,
+    CASE WHEN e.LCY_AMOUNT IS NOT NULL THEN 'SUCCESS'ELSE 'FAIL' END AS STATUT
+    from  PI_FINAL ni
+    LEFT JOIN ecriture e  on ni.TXNREFNO = e.REF_PI
+    AND e.AC_NO = ni.NUMCPT
+
+    )
+    select i.* ,s.NOM_CLIENT,s.STATUT as "STATUT_TRANSACTION_PI",s.SAVE_TIMESTAMP
+    from PI_FINAL i 
+    left join STATUT_TRANSACTION_PI s on i.TXNREFNO = s.TXNREFNO
+        
+    
     """)
 
     # ========================================================
-# FENÊTRE MÉTIER PI/SPI
-# 09:00 du jour de début
-# jusqu'à 09:00 du jour de fin
-# ========================================================
+    # FENETRE DE RECONCILIATION
+    # Date debut : 00:00:00
+    # Date fin   : 00:00:00
+    #
+    # La requete SQL ci-dessus n'est pas modifiee.
+    # Le filtrage de la periode est applique apres extraction
+    # sur SAVE_TIMESTAMP, date/heure retenue pour la reconciliation.
+    # ========================================================
 
-    date_debut = (
-        pd.Timestamp(date_debut)
-        .normalize()
-        + pd.Timedelta(hours=9)
-    )
+    date_debut_ts = pd.Timestamp(date_debut).normalize()
+    date_fin_ts = pd.Timestamp(date_fin).normalize()
+    
+    test_sql = """
+    SELECT
+        SYS_CONTEXT('USERENV', 'SESSION_USER') AS SESSION_USER,
+        SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS CURRENT_SCHEMA
+    FROM DUAL
+    """
 
-    date_fin = (
-        pd.Timestamp(date_fin)
-        .normalize()
-        + pd.Timedelta(hours=9)
-    )
+    test_df = oracle_query(rt, test_sql, {})
+    print(test_df)
 
-    return oracle_query(
+    df = oracle_query(
         rt,
         sql,
         {
-            "compte": compte,
-            "date_debut": date_debut.to_pydatetime(),
-            "date_fin": date_fin.to_pydatetime(),
+            "date_debut": date_debut,
+            "date_fin": date_fin,
+        
         },
     )
 
@@ -575,23 +207,79 @@ def get_pispi_flex(
         return df
 
     # ========================================================
-    # COLONNES STANDARD POUR LE MOTEUR DE RECONCILIATION
+    # COLONNES DE RECONCILIATION
     # ========================================================
 
-    df["CODE_TRANSACTION_OPERATEUR"] = df["TRN_REF_NO"]
-    df["CODE_TRANSACTION"] = df["TRN_REF_NO"]
-    df["NUMERO_COMPTE"] = df["ACCOUNT_NO"]
+    df["SAVE_TIMESTAMP"] = pd.to_datetime(
+        df["SAVE_TIMESTAMP"],
+        errors="coerce",
+    )
+
+    df = df[
+        (df["SAVE_TIMESTAMP"] >= date_debut_ts)
+        & (df["SAVE_TIMESTAMP"] < date_fin_ts)
+    ].copy()
+
+    # ========================================================
+    # MAPPING METIER PI/SPI
+    #
+    # Rapprochement uniquement sur :
+    # - NUMERO_COMPTE
+    # - MONTANT_COMPARAISON
+    # - DATE_HEURE
+    #
+    # TXNREFNO / CODE_TRANSACTION reste informatif.
+    # ========================================================
+
+    df["NUMERO_COMPTE"] = (
+        df["NUMCPT"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    df["MONTANT_COMPARAISON"] = pd.to_numeric(
+        df["MONTANT"],
+        errors="coerce",
+    )
+
     df["DATE_VALEUR"] = df["SAVE_TIMESTAMP"]
+    df["DATE_HEURE"] = df["SAVE_TIMESTAMP"]
 
-    df["MOUVEMENT_DEBIT"] = pd.to_numeric(
-        df["DEBIT"],
-        errors="coerce",
-    ).fillna(0)
+    df["CODE_TRANSACTION"] = (
+        df["TXNREFNO"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
 
-    df["MOUVEMENT_CREDIT"] = pd.to_numeric(
-        df["CREDIT"],
-        errors="coerce",
-    ).fillna(0)
+    df["CODE_TRANSACTION_OPERATEUR"] = df["CODE_TRANSACTION"]
+
+    df["SENS"] = (
+        df["DRCR_IND"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    df["TYPE_TRANSACTION"] = df["SENS"].map(
+        {
+            "C": "W2B",
+            "D": "B2W",
+        }
+    )
+
+    df["MOUVEMENT_CREDIT"] = 0.0
+    df["MOUVEMENT_DEBIT"] = 0.0
+
+    df.loc[df["SENS"] == "C", "MOUVEMENT_CREDIT"] = df.loc[
+        df["SENS"] == "C", "MONTANT_COMPARAISON"
+    ]
+
+    df.loc[df["SENS"] == "D", "MOUVEMENT_DEBIT"] = df.loc[
+        df["SENS"] == "D", "MONTANT_COMPARAISON"
+    ]
 
     return df
 
@@ -604,10 +292,6 @@ def get_pispi_flex(
 def export_pispi_flex(
     date_debut: str,
     date_fin: str,
-    compte: str = Query(
-        "114100000052",
-        description="Compte suspense PI/SPI",
-    ),
     format: str = Query(
         "excel",
         description="excel ou json",
@@ -617,7 +301,6 @@ def export_pispi_flex(
     df = get_pispi_flex(
         date_debut,
         date_fin,
-        compte,
     )
 
     if df is None or df.empty:
@@ -683,15 +366,7 @@ def export_pispi_flex(
     # C = Crédit -> montant dans MOUVEMENT_CREDIT
     # D = Débit  -> montant dans MOUVEMENT_DEBIT
 
-    df["MOUVEMENT_CREDIT"] = pd.to_numeric(
-        df["CREDIT"],
-        errors="coerce",
-    ).fillna(0)
-
-    df["MOUVEMENT_DEBIT"] = pd.to_numeric(
-        df["DEBIT"],
-        errors="coerce",
-    ).fillna(0)
+    
 
     w2b["TYPE_TRANSACTION"] = "W2B"
     b2w["TYPE_TRANSACTION"] = "B2W"

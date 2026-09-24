@@ -1,16 +1,49 @@
-.env
-.env.local
-*.pyc
-__pycache__/
-
+# Environnements virtuels
 .venv/
-.venv_broken_windows/
-.venv_windows/
 venv/
-*.db
-*.db-journal
-.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Résultats de réconciliation
+reconciliation_*.xlsx
+RESULTAT_*.xlsx
+*_FINAL.xlsx
+
+# Fichiers générés
+openapi.json
+openapi_test.json
+
+# Sauvegardes de code
+*_AVANT_RESTAURATION.py
+*_avant_correction.py
+*_avant_fusion.py
+*_backup.py
+*.bak
+
+# Fichiers temporaires Excel
+**/~$*
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Archives
 _archive/
+
+# Credentials
 credentials.json
 ui/credentials.json
-**/~$*
+
+# Configuration locale
+.env
+.env.local
+
+# Bases de données locales
+*.db
+*.db-journal

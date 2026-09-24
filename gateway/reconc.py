@@ -101,6 +101,7 @@
 
 import io
 import json
+import unicodedata
 from datetime import datetime
 from typing import List
 
@@ -422,6 +423,374 @@ def db_tables():
 
 
 # ============================================================
+# FALLBACK PI/SPI — NIVEAU 2 PAR NOM + MONTANT + SENS + HEURE
+# La comparaison des noms ignore aussi l'ordre NOM/PRENOM.
+# ------------------------------------------------------------
+# Le moteur commun effectue déjà le niveau 1 PI/SPI par compte +
+# montant + sens + heure. Pour PI/SPI uniquement, si une ligne
+# partenaire reste "Non comptabilisée", on tente un second niveau
+# avec le nom + montant + sens + heure. Les seuils/statuts restent
+# exactement ceux du moteur commun : 8 secondes, puis 1h, puis >1h
+# jusqu'à la fenêtre maximale existante (24h).
+# ============================================================
+
+PISPI_TOLERANCE_SECONDES = 8
+PISPI_FENETRE_MAX_SECONDES = 3600 * 24
+
+
+def _normaliser_nom_pispi(value) -> str:
+    """
+    Normalise un nom PI/SPI pour le niveau 2.
+
+    L'ordre des mots n'est pas significatif :
+        DIENG OUMY -> DIENG OUMY
+        OUMY DIENG -> DIENG OUMY
+
+    Les accents, la casse et les espaces multiples sont ignorés.
+    """
+    if value is None or pd.isna(value):
+        return ""
+
+    value = str(value).strip()
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(
+        c for c in value
+        if not unicodedata.combining(c)
+    )
+    value = value.upper()
+
+    # On conserve uniquement les éléments du nom et on les trie.
+    # Ainsi NOM PRENOM et PRENOM NOM deviennent identiques.
+    morceaux = value.split()
+    morceaux = [m for m in morceaux if m]
+    morceaux.sort()
+
+    return " ".join(morceaux)
+
+
+def _colonne_disponible(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def _fallback_nom_pispi(
+    resultat: pd.DataFrame,
+    wp_raw: pd.DataFrame,
+    wf_raw: pd.DataFrame,
+    sens_attendu: str,
+    tolerance_secondes: int = PISPI_TOLERANCE_SECONDES,
+) -> pd.DataFrame:
+    """
+    Niveau 2 PI/SPI uniquement : Nom + montant + sens + date/heure.
+
+    IMPORTANT :
+      - WP_CLIENT_PAYE n'est pas forcément présent dans la table de
+        réconciliation finale.
+      - Le nom partenaire est donc récupéré depuis wp_raw
+        (PISPI_W2B / PISPI_B2W), sans utiliser la référence de transaction.
+      - Le niveau 2 ne réutilise que les lignes encore :
+          * partenaire : "Non comptabilisée"
+          * Flex       : "Comptabilisation isolée"
+      - Les lignes Flex déjà utilisées au niveau 1 ne peuvent jamais
+        être reprises.
+    """
+    if resultat is None or resultat.empty:
+        return resultat
+
+    resultat = resultat.copy()
+
+    # --------------------------------------------------------
+    # Colonnes disponibles côté source partenaire.
+    # CLIENT_PAYE sert uniquement à récupérer le nom correspondant
+    # à la ligne partenaire restée non rapprochée.
+    # --------------------------------------------------------
+    wp_name_col = _colonne_disponible(
+        wp_raw,
+        ["CLIENT_PAYE", "CLIENT PAYE"],
+    )
+    wp_account_col = _colonne_disponible(
+        wp_raw,
+        ["NUMERO_COMPTE", "NUMCPT"],
+    )
+    wp_time_col = _colonne_disponible(
+        wp_raw,
+        ["date", "DATE TRANSACTION", "DATE_HEURE"],
+    )
+    wp_amount_col = _colonne_disponible(
+        wp_raw,
+        ["MONTANT_COMPARAISON", "MONTANT", "montant"],
+    )
+
+    if not all([wp_name_col, wp_account_col, wp_time_col, wp_amount_col]):
+        print(
+            "[PISPI] Niveau 2 ignoré : "
+            "colonnes source partenaire nécessaires absentes."
+        )
+        return resultat
+
+    # Le nom Flex doit déjà être présent dans le résultat produit
+    # par le moteur commun.
+    if "WF_NOM_CLIENT" not in resultat.columns:
+        print(
+            "[PISPI] Niveau 2 ignoré : colonne WF_NOM_CLIENT absente "
+            "du résultat de réconciliation."
+        )
+        return resultat
+
+    # --------------------------------------------------------
+    # Préparation de la source partenaire.
+    # On ne fait JAMAIS de rapprochement sur REFERENCETRANSACTION.
+    # Le compte + montant + date servent uniquement à retrouver
+    # le CLIENT_PAYE de la ligne source correspondante.
+    # --------------------------------------------------------
+    wp = wp_raw.copy()
+    wp["_PISPI_NOM"] = wp[wp_name_col].apply(_normaliser_nom_pispi)
+    wp["_PISPI_COMPTE"] = wp[wp_account_col].apply(
+        lambda x: "" if pd.isna(x) else str(x).strip()
+    )
+    wp["_PISPI_DATE"] = pd.to_datetime(
+        wp[wp_time_col],
+        errors="coerce",
+    )
+    wp["_PISPI_MONTANT"] = pd.to_numeric(
+        wp[wp_amount_col],
+        errors="coerce",
+    )
+
+    # --------------------------------------------------------
+    # Candidats Flex :
+    # uniquement les lignes encore isolées après le niveau 1.
+    # Le sens est explicite : W2B ou B2W.
+    # --------------------------------------------------------
+    candidats_flex = []
+
+    for result_index, row in resultat[
+        resultat["STATUT"] == "Comptabilisation isolée"
+    ].iterrows():
+
+        sens = str(row.get("SENS", "")).strip().upper()
+        if sens != sens_attendu.upper():
+            continue
+
+        nom = _normaliser_nom_pispi(row.get("WF_NOM_CLIENT", ""))
+        montant = pd.to_numeric(
+            row.get("WF_MONTANT_COMPARAISON"),
+            errors="coerce",
+        )
+        date = pd.to_datetime(
+            row.get("WF_DATE_HEURE"),
+            errors="coerce",
+        )
+
+        if not nom or pd.isna(montant) or pd.isna(date):
+            continue
+
+        candidats_flex.append(
+            {
+                "result_index": result_index,
+                "nom": nom,
+                "montant": float(montant),
+                "date": date,
+                "sens": sens,
+                "utilise": False,
+            }
+        )
+
+    if not candidats_flex:
+        print(
+            f"[PISPI] Niveau 2 {sens_attendu} : "
+            "aucune comptabilisation isolée disponible."
+        )
+        return resultat
+
+    # --------------------------------------------------------
+    # Niveau 2.
+    # Pour chaque ligne partenaire non comptabilisée :
+    #   1. retrouver son CLIENT_PAYE dans wp_raw ;
+    #   2. chercher Flex par NOM + MONTANT + SENS + DATE/HEURE ;
+    #   3. consommer la ligne source et la ligne Flex uniquement
+    #      si le rapprochement est effectivement réalisé.
+    # --------------------------------------------------------
+    source_wp_utilisees = set()
+    nb_fallback = 0
+
+    lignes_wp = resultat[
+        (resultat["STATUT"] == "Non comptabilisée")
+        & (
+            resultat["SENS"].astype(str).str.upper().str.strip()
+            == sens_attendu.upper()
+        )
+    ]
+
+    for idx, row in lignes_wp.iterrows():
+
+        montant_wp = pd.to_numeric(
+            row.get("WP_MONTANT_COMPARAISON"),
+            errors="coerce",
+        )
+        date_wp = pd.to_datetime(
+            row.get("WP_DATE_HEURE"),
+            errors="coerce",
+        )
+
+        if pd.isna(montant_wp) or pd.isna(date_wp):
+            continue
+
+        compte_resultat = row.get("WP_NUMERO_COMPTE")
+        compte_resultat = (
+            "" if pd.isna(compte_resultat)
+            else str(compte_resultat).strip()
+        )
+
+        if not compte_resultat:
+            continue
+
+        # ----------------------------------------------------
+        # Retrouver la ligne source Excel correspondante afin
+        # d'obtenir CLIENT_PAYE.
+        # Pas de référence utilisée.
+        # ----------------------------------------------------
+        candidats_wp = []
+
+        for source_index, source_row in wp.iterrows():
+
+            if source_index in source_wp_utilisees:
+                continue
+
+            compte_source = source_row["_PISPI_COMPTE"]
+
+            if compte_source != compte_resultat:
+                continue
+
+            montant_source = source_row["_PISPI_MONTANT"]
+
+            if pd.isna(montant_source):
+                continue
+
+            if float(montant_source) != float(montant_wp):
+                continue
+
+            date_source = source_row["_PISPI_DATE"]
+
+            if pd.isna(date_source):
+                continue
+
+            diff_source = abs(
+                (date_wp - date_source).total_seconds()
+            )
+
+            if diff_source > PISPI_FENETRE_MAX_SECONDES:
+                continue
+
+            nom_source = source_row["_PISPI_NOM"]
+
+            if not nom_source:
+                continue
+
+            candidats_wp.append(
+                (
+                    diff_source,
+                    source_index,
+                    nom_source,
+                )
+            )
+
+        if not candidats_wp:
+            continue
+
+        candidats_wp.sort(key=lambda x: x[0])
+        _, source_index, nom_wp = candidats_wp[0]
+
+        # ----------------------------------------------------
+        # Recherche niveau 2 côté Flex :
+        # NOM + MONTANT + SENS + DATE/HEURE
+        # ----------------------------------------------------
+        meilleur = None
+        meilleur_diff = float("inf")
+
+        for cand in candidats_flex:
+
+            if cand["utilise"]:
+                continue
+
+            if cand["sens"] != sens_attendu.upper():
+                continue
+
+            if cand["nom"] != nom_wp:
+                continue
+
+            if cand["montant"] != float(montant_wp):
+                continue
+
+            diff = abs(
+                (date_wp - cand["date"]).total_seconds()
+            )
+
+            if diff > PISPI_FENETRE_MAX_SECONDES:
+                continue
+
+            if diff < meilleur_diff:
+                meilleur = cand
+                meilleur_diff = diff
+
+        if meilleur is None:
+            continue
+
+        # ----------------------------------------------------
+        # Rapprochement trouvé :
+        # on complète la ligne partenaire avec les colonnes Flex.
+        # ----------------------------------------------------
+        flex_row = resultat.loc[meilleur["result_index"]]
+
+        for col in resultat.columns:
+            if col.startswith("WF_"):
+                resultat.at[idx, col] = flex_row[col]
+
+        # Même logique de statut que le moteur commun.
+        if meilleur_diff == 0:
+            resultat.at[idx, "STATUT"] = "Réconcilié"
+        elif meilleur_diff <= tolerance_secondes:
+            resultat.at[idx, "STATUT"] = "Réconcilié avec tolérance"
+        elif meilleur_diff <= 3600:
+            resultat.at[idx, "STATUT"] = "Réconcilié - écart 8s à 1h"
+        else:
+            resultat.at[idx, "STATUT"] = "Réconcilié - écart > 1h"
+
+        # Une ligne source partenaire et une ligne Flex ne peuvent
+        # être consommées qu'une seule fois.
+        source_wp_utilisees.add(source_index)
+        meilleur["utilise"] = True
+
+        # La ligne Flex isolée est retirée du résultat final puisqu'elle
+        # vient maintenant d'être rapprochée avec cette ligne partenaire.
+        resultat.at[
+            meilleur["result_index"],
+            "_PISPI_FALLBACK_SUPPRIMER",
+        ] = True
+
+        nb_fallback += 1
+
+    if "_PISPI_FALLBACK_SUPPRIMER" in resultat.columns:
+        resultat = resultat[
+            resultat["_PISPI_FALLBACK_SUPPRIMER"] != True
+        ].copy()
+        resultat.drop(
+            columns=["_PISPI_FALLBACK_SUPPRIMER"],
+            inplace=True,
+        )
+
+    print(
+        f"[PISPI] Niveau 2 {sens_attendu} "
+        f"Nom + Montant + Sens + Date/heure : "
+        f"{nb_fallback} rapprochement(s) supplémentaire(s)"
+    )
+
+    return resultat.reset_index(drop=True)
+
+
+# ============================================================
 # RÉCONCILIATION — Two Pointers (W2B + B2W), PARAMÉTRÉE
 # ------------------------------------------------------------
 # Réservée aux partenaires en mode "two_pointers". Pour un
@@ -455,6 +824,18 @@ def run_reconciliation(partenaire: str = Query(...)):
     wp_b2w_raw = read_table(t["excel_b2w"])
     wf_w2b_raw = read_table(t["flex_w2b"])
     wf_b2w_raw = read_table(t["flex_b2w"])
+
+    # --------------------------------------------------------
+    # Compatibilité PISPI :
+    # le moteur commun attend "TYPE TRANSACTION"
+    # alors que PISPI fournit "TYPE_TRANSACTION".
+    # --------------------------------------------------------
+
+    if "TYPE_TRANSACTION" in wp_w2b_raw.columns:
+        wp_w2b_raw["TYPE TRANSACTION"] = wp_w2b_raw["TYPE_TRANSACTION"]
+
+    if "TYPE_TRANSACTION" in wp_b2w_raw.columns:
+        wp_b2w_raw["TYPE TRANSACTION"] = wp_b2w_raw["TYPE_TRANSACTION"]
 
     # --------------------------------------------------------
     # Vérification des sources disponibles par sens.
@@ -507,8 +888,8 @@ def run_reconciliation(partenaire: str = Query(...)):
     )
     
     apparier_par_compte_montant = cfg.get(
-    "apparier_par_compte_montant",
-    False,
+        "apparier_par_compte_montant",
+        False,
     ) 
 
     try:
@@ -542,6 +923,49 @@ def run_reconciliation(partenaire: str = Query(...)):
             resultats,
             ignore_index=True,
         )
+
+        # PI/SPI uniquement : niveau 2 après le rapprochement standard.
+        # Le moteur commun reste inchangé pour tous les partenaires.
+        if partenaire.upper() == "PISPI":
+            if w2b_disponible:
+                mask_w2b = resultat_final["SENS"] == "W2B"
+                resultat_w2b_final = _fallback_nom_pispi(
+                    resultat_final.loc[mask_w2b].copy(),
+                    wp_w2b_raw,
+                    wf_w2b_raw,
+                    sens_attendu="W2B",
+                    tolerance_secondes=(
+                        60 if apparier_par_compte_montant
+                        else PISPI_TOLERANCE_SECONDES
+                    ),
+                )
+                resultat_final = pd.concat(
+                    [
+                        resultat_final.loc[~mask_w2b],
+                        resultat_w2b_final,
+                    ],
+                    ignore_index=True,
+                )
+
+            if b2w_disponible:
+                mask_b2w = resultat_final["SENS"] == "B2W"
+                resultat_b2w_final = _fallback_nom_pispi(
+                    resultat_final.loc[mask_b2w].copy(),
+                    wp_b2w_raw,
+                    wf_b2w_raw,
+                    sens_attendu="B2W",
+                    tolerance_secondes=(
+                        60 if apparier_par_compte_montant
+                        else PISPI_TOLERANCE_SECONDES
+                    ),
+                )
+                resultat_final = pd.concat(
+                    [
+                        resultat_final.loc[~mask_b2w],
+                        resultat_b2w_final,
+                    ],
+                    ignore_index=True,
+                )
 
     except KeyError as e:
         raise HTTPException(
