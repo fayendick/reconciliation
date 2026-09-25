@@ -310,9 +310,8 @@ async def charger(
 
     # Appels in-process — pas de HTTP loopback sur le même worker.
     excel_response = await call_partner_upload(
-        partenaire,
-        files_payload,
-        params={"format": "json"},
+    partenaire,
+    files_payload,
     )
 
     if excel_response.status_code != 200:

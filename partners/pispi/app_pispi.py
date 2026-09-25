@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from config import DB_PATH, PARTENAIRES, make_sqlite_engine
 from common.excel_common import sauvegarder_sqlite
 from common.sqlite_io import lire_table_json
+from typing import Any, List
 
 
 # ============================================================
@@ -680,15 +681,22 @@ def sauvegarder_pispi(
 
 @app.post("/process-excel")
 async def process_excel(
-    fichier: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
 ):
-    """
-    Endpoint appelé par le gateway.
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucun fichier PI/SPI fourni.",
+        )
 
-    Exemple :
-        /svc/pispi-excel/process-excel
-    """
+    fichier = files[0]
 
+    """
+    Traite un fichier Excel PI/SPI :
+    - Onglet : Liste des transferts de fonds
+    - REÇU : Compte du payé
+    - ENVOYÉ : Compte du payeur
+    """
     nom_fichier = fichier.filename or "pispi.xlsx"
 
     if not nom_fichier.lower().endswith(

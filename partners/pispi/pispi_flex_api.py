@@ -67,8 +67,8 @@ FROM OMB_SN.PITRANSACTION i, CFSFCUBS145.ACVW_ALL_AC_ENTRIES  a
 WHERE i.TXNREFNO = a.EXTERNAL_REF_NO
   AND a.AC_NO = i.NCPDEBITEUR
   AND i.SENS = 'D'
-  and a.TRN_DT between to_date(:date_debut, 'YYYY-MM-DD')
-                 and to_date(:date_fin, 'YYYY-MM-DD')
+  and a.TRN_DT between to_date(:date_debut, 'DD/MM/YYYY')
+                   and to_date(:date_fin, 'DD/MM/YYYY')
   
   
   
@@ -96,8 +96,8 @@ FROM OMB_SN.PITRANSACTION i, CFSFCUBS145.ACVW_ALL_AC_ENTRIES a
 WHERE i.TXNREFNO = a.EXTERNAL_REF_NO
   AND a.AC_NO = i.COMPTEPAYE
   AND i.SENS = 'C'
-  and a.TRN_DT between to_date(:date_debut, 'YYYY-MM-DD')
-                 and to_date(:date_fin, 'YYYY-MM-DD')
+  and a.TRN_DT between to_date(:date_debut, 'DD/MM/YYYY')
+                 and to_date(:date_fin, 'DD/MM/YYYY')
  
  
 
