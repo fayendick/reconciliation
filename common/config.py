@@ -798,3 +798,38 @@ def get_mode(nom: str) -> str:
 
 
 
+# ============================================================
+# PARTENAIRE ORANGE_COFINA_MOBILE_PLUS
+# ============================================================
+
+PARTENAIRES["ORANGE_COFINA_MOBILE_PLUS"] = {
+    "label": "Orange API / Cofina Mobile Plus",
+    "mode": MODE_TWO_POINTERS,
+    "upload_url": os.getenv(
+        "ORANGE_COFINA_MOBILE_PLUS_UPLOAD_URL",
+        f"{GATEWAY_BASE_URL}/svc/orange-cofina-mobile-plus-excel/process-excel",
+    ),
+    "flex_url": os.getenv(
+        "ORANGE_COFINA_MOBILE_PLUS_FLEX_URL",
+        f"{GATEWAY_BASE_URL}/svc/orange-cofina-mobile-plus-flex/orange-cofina-mobile-plus-flex",
+    ),
+    "tables": {
+        "excel": "COMPILATION_ORANGE_COFINA_MOBILE_PLUS",
+        "excel_w2b": "COMPILATION_ORANGE_COFINA_MOBILE_PLUS_W2B",
+        "excel_b2w": "COMPILATION_ORANGE_COFINA_MOBILE_PLUS_B2W",
+        "flex": "ORANGE_COFINA_MOBILE_PLUS_FLEX",
+        "flex_w2b": "ORANGE_COFINA_MOBILE_PLUS_FLEX_W2B",
+        "flex_b2w": "ORANGE_COFINA_MOBILE_PLUS_FLEX_B2W",
+        "reconciliation": "RECONCILIATION_ORANGE_COFINA_MOBILE_PLUS",
+        "doublons": "DOUBLONS_ORANGE_COFINA_MOBILE_PLUS",
+    },
+    "apparier_par_telephone_montant": True,
+    "colonnes_resume": {
+        "num_tel_client": ["WP_NUMERO COMPTE", "WF_NUMERO_COMPTE"],
+        "nom_client": None,
+        "agence": None,
+        "periode_fichier": "WF_DATE_VALEUR",
+    },
+}
+
+

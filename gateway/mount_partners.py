@@ -35,6 +35,9 @@ PARTNER_MOUNTS: List[Tuple[str, str]] = [
     ("/svc/niirpay-flex", "partners.niirpay.niirpay_flex_api"),
     ("/svc/pispi-excel", "partners.pispi.app_pispi"),
     ("/svc/pispi-flex", "partners.pispi.pispi_flex_api"),
+    ("/svc/orange-cofina-mobile-plus-excel", "partners.orange_cofina_mobile_plus.app_orange_cofina_mobile_plus"),
+    ("/svc/orange-cofina-mobile-plus-flex", "partners.orange_cofina_mobile_plus.orange_cofina_mobile_plus_flex_api"),
+    
 ]
 
 # Cibles pour /charger (module + chemin interne de la sous-app)
@@ -88,6 +91,12 @@ PARTNER_ASGI: Dict[str, Dict[str, str]] = {
         "upload_path": "/process-excel",
         "flex_module": "partners.pispi.pispi_flex_api",
         "flex_path": "/pispi-flex",
+    },
+        "ORANGE_COFINA_MOBILE_PLUS": {
+        "upload_module": "partners.orange_cofina_mobile_plus.app_orange_cofina_mobile_plus",
+        "upload_path": "/process-excel",
+        "flex_module": "partners.orange_cofina_mobile_plus.orange_cofina_mobile_plus_flex_api",
+        "flex_path": "/orange-cofina-mobile-plus-flex",
     },
 }
 
