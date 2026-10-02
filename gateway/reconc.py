@@ -806,6 +806,201 @@ def _fallback_nom_pispi(
 # Positionné à True uniquement pour ORANGE_USSD (voir config.py).
 # ============================================================
 
+def reconcilier_western_par_agence(
+    wp_raw: pd.DataFrame,
+    wf_raw: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Réconciliation WESTERN par agence.
+
+    Côté partenaire :
+        DEBIT_PARTENAIRE
+        CREDIT_PARTENAIRE
+
+    Côté Flex :
+        ACCOUNT_NO = 101100000001
+        TRN_CODE = 121 -> DEBIT
+        TRN_CODE = 122 -> CREDIT
+
+    TAXE est calculée uniquement à partir du surplus de crédit
+    côté partenaire :
+
+        TAXE = CREDIT_PARTENAIRE - CREDIT_FLEX
+
+    Aucun compte TAXE Flexcube n'est utilisé.
+    """
+
+    partenaire = wp_raw.copy()
+    flex = wf_raw.copy()
+
+    # ------------------------------------------------------------
+    # NORMALISATION DES AGENCES
+    # ------------------------------------------------------------
+    partenaire["CODE_AGENCE"] = pd.to_numeric(
+        partenaire["CODE_AGENCE"], errors="coerce"
+    ).astype("Int64")
+
+    flex["CODE_AGENCE"] = pd.to_numeric(
+        flex["CODE_AGENCE"], errors="coerce"
+    ).astype("Int64")
+
+    # ------------------------------------------------------------
+    # MONTANTS PARTENAIRE
+    # ------------------------------------------------------------
+    partenaire["DEBIT_PARTENAIRE"] = pd.to_numeric(
+        partenaire["DEBIT_PARTENAIRE"], errors="coerce"
+    ).fillna(0)
+
+    partenaire["CREDIT_PARTENAIRE"] = pd.to_numeric(
+        partenaire["CREDIT_PARTENAIRE"], errors="coerce"
+    ).fillna(0)
+
+    partenaire_agg = (
+        partenaire
+        .groupby(
+            ["CODE_AGENCE", "NOM_AGENCE"],
+            as_index=False,
+            dropna=False,
+        )
+        .agg(
+            DEBIT_PARTENAIRE=("DEBIT_PARTENAIRE", "sum"),
+            CREDIT_PARTENAIRE=("CREDIT_PARTENAIRE", "sum"),
+        )
+    )
+
+    # ------------------------------------------------------------
+    # FLEX : UNIQUEMENT LE COMPTE OPERATIONNEL WESTERN
+    # ------------------------------------------------------------
+    flex["ACCOUNT_NO"] = (
+        flex["ACCOUNT_NO"]
+        .astype(str)
+        .str.strip()
+    )
+
+    flex["TRN_CODE"] = (
+        flex["TRN_CODE"]
+        .astype(str)
+        .str.strip()
+    )
+
+    flex["DEBIT"] = pd.to_numeric(
+        flex["DEBIT"], errors="coerce"
+    ).fillna(0)
+
+    flex["CREDIT"] = pd.to_numeric(
+        flex["CREDIT"], errors="coerce"
+    ).fillna(0)
+
+    flex_operationnel = flex[
+        flex["ACCOUNT_NO"].eq("101100000001")
+        & flex["TRN_CODE"].isin(["121", "122"])
+    ].copy()
+
+    flex_agg = (
+        flex_operationnel
+        .groupby("CODE_AGENCE", as_index=False)
+        .agg(
+            DEBIT_FLEX=("DEBIT", "sum"),
+            CREDIT_FLEX=("CREDIT", "sum"),
+        )
+    )
+
+    # ------------------------------------------------------------
+    # RAPPROCHEMENT
+    # On part des agences présentes côté partenaire.
+    # ------------------------------------------------------------
+    resultat = partenaire_agg.merge(
+        flex_agg,
+        on="CODE_AGENCE",
+        how="left",
+    )
+
+    resultat["DEBIT_FLEX"] = resultat["DEBIT_FLEX"].fillna(0)
+    resultat["CREDIT_FLEX"] = resultat["CREDIT_FLEX"].fillna(0)
+
+    # ------------------------------------------------------------
+    # SOLDES
+    # ------------------------------------------------------------
+    resultat["SOLDE_PARTENAIRE"] = (
+        resultat["DEBIT_PARTENAIRE"]
+        - resultat["CREDIT_PARTENAIRE"]
+    )
+
+    resultat["SOLDE_FLEX"] = (
+        resultat["DEBIT_FLEX"]
+        - resultat["CREDIT_FLEX"]
+    )
+
+    # ------------------------------------------------------------
+    # ECARTS DEBIT / CREDIT
+    # ------------------------------------------------------------
+    resultat["ECART_DEBIT"] = (
+        resultat["DEBIT_PARTENAIRE"]
+        - resultat["DEBIT_FLEX"]
+    )
+
+    resultat["ECART_CREDIT"] = (
+        resultat["CREDIT_PARTENAIRE"]
+        - resultat["CREDIT_FLEX"]
+    )
+
+    # ------------------------------------------------------------
+    # SURPLUS CREDIT = TAXE A SUIVRE
+    # ------------------------------------------------------------
+    resultat["CREDIT_SURPLUS_PARTENAIRE"] = (
+        resultat["ECART_CREDIT"]
+    )
+
+    resultat["TAXE"] = (
+        resultat["CREDIT_SURPLUS_PARTENAIRE"]
+    )
+
+    # ------------------------------------------------------------
+    # ECART GLOBAL DE SOLDE
+    # ------------------------------------------------------------
+    resultat["ECART_SOLDE"] = (
+        resultat["SOLDE_PARTENAIRE"]
+        - resultat["SOLDE_FLEX"]
+    )
+
+    # ------------------------------------------------------------
+    # STATUT
+    # ------------------------------------------------------------
+    resultat["STATUT"] = "Ecart montant"
+
+    masque_reconcilie = (
+        resultat["ECART_DEBIT"].abs().eq(0)
+        & resultat["ECART_CREDIT"].abs().le(15000)
+    )
+
+    resultat.loc[masque_reconcilie, "STATUT"] = "Réconcilié"
+
+    # ------------------------------------------------------------
+    # ORDRE DES COLONNES
+    # ------------------------------------------------------------
+    colonnes = [
+        "CODE_AGENCE",
+        "NOM_AGENCE",
+        "DEBIT_PARTENAIRE",
+        "DEBIT_FLEX",
+        "ECART_DEBIT",
+        "CREDIT_PARTENAIRE",
+        "CREDIT_FLEX",
+        "ECART_CREDIT",
+        "CREDIT_SURPLUS_PARTENAIRE",
+        "TAXE",
+        "SOLDE_PARTENAIRE",
+        "SOLDE_FLEX",
+        "ECART_SOLDE",
+        "STATUT",
+    ]
+
+    resultat = resultat[colonnes]
+
+    return resultat.sort_values(
+        "CODE_AGENCE"
+    ).reset_index(drop=True)
+
 @app.post("/reconciliation/run")
 def run_reconciliation(partenaire: str = Query(...)):
 
@@ -1513,6 +1708,9 @@ def get_reconciliation_graphe_evolution(
     return JSONResponse(content=json.loads(fig.to_json()))
 
 
+
+
+
 # ============================================================
 # RÉCONCILIATION PAR AGENCE — CODE_AGENCE / DEBIT / CREDIT
 # ------------------------------------------------------------
@@ -1537,6 +1735,53 @@ def get_reconciliation_graphe_evolution(
 # "two_pointers" (Wave, Wizz), avec un message qui renvoie vers
 # /reconciliation/run.
 # ============================================================
+
+def construire_table_resume_western(resultat: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construit le résumé spécifique à WESTERN.
+
+    Le résumé conserve les écarts débit/crédit ainsi que la TAXE
+    calculée à partir du surplus de crédit partenaire.
+    """
+    colonnes = [
+        "CODE_AGENCE",
+        "NOM_AGENCE",
+        "DEBIT_PARTENAIRE",
+        "DEBIT_FLEX",
+        "ECART_DEBIT",
+        "CREDIT_PARTENAIRE",
+        "CREDIT_FLEX",
+        "ECART_CREDIT",
+        "CREDIT_SURPLUS_PARTENAIRE",
+        "TAXE",
+        "SOLDE_PARTENAIRE",
+        "SOLDE_FLEX",
+        "ECART_SOLDE",
+        "STATUT",
+    ]
+
+    resume = resultat[colonnes].copy()
+
+    resume = resume.rename(
+        columns={
+            "CODE_AGENCE": "Code Agence",
+            "NOM_AGENCE": "Agence",
+            "DEBIT_PARTENAIRE": "Débit Partenaire",
+            "DEBIT_FLEX": "Débit Flex",
+            "ECART_DEBIT": "Ecart Débit",
+            "CREDIT_PARTENAIRE": "Crédit Partenaire",
+            "CREDIT_FLEX": "Crédit Flex",
+            "ECART_CREDIT": "Ecart Crédit",
+            "CREDIT_SURPLUS_PARTENAIRE": "Surplus Crédit Partenaire",
+            "TAXE": "TAXE",
+            "SOLDE_PARTENAIRE": "Solde Partenaire",
+            "SOLDE_FLEX": "Solde Flex",
+            "ECART_SOLDE": "Ecart Solde",
+            "STATUT": "Statut",
+        }
+    )
+
+    return resume
 
 @app.post("/reconciliation/run-agence")
 def run_reconciliation_agence(partenaire: str = Query(...)):
@@ -1585,11 +1830,18 @@ def run_reconciliation_agence(partenaire: str = Query(...)):
     col_debit = colonnes_agence.get("col_debit", "MONTANT_CASHOUT")
 
     try:
-        resultat_final = reconcilier_par_agence(
-            wp_raw, wf_raw,
-            col_credit=col_credit,
-            col_debit=col_debit,
-        )
+        if partenaire.upper() == "WESTERN":
+            resultat_final = reconcilier_western_par_agence(
+                wp_raw,
+                wf_raw,
+            )
+        else:
+            resultat_final = reconcilier_par_agence(
+                wp_raw,
+                wf_raw,
+                col_credit=col_credit,
+                col_debit=col_debit,
+            )
     except KeyError as e:
         raise HTTPException(
             status_code=400,
@@ -1609,7 +1861,10 @@ def run_reconciliation_agence(partenaire: str = Query(...)):
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         resultat_final.to_excel(writer, sheet_name="Resultat_Agence", index=False)
 
-        table_resume = construire_table_resume_agence(resultat_final)
+        if partenaire.upper() == "WESTERN":
+            table_resume = construire_table_resume_western(resultat_final)
+        else:
+            table_resume = construire_table_resume_agence(resultat_final)
         table_resume.to_excel(writer, sheet_name="Resume_Agence", index=False)
 
         for statut in statuts_agence:

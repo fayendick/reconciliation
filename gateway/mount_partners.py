@@ -37,6 +37,8 @@ PARTNER_MOUNTS: List[Tuple[str, str]] = [
     ("/svc/pispi-flex", "partners.pispi.pispi_flex_api"),
     ("/svc/orange-cofina-mobile-plus-excel", "partners.orange_cofina_mobile_plus.app_orange_cofina_mobile_plus"),
     ("/svc/orange-cofina-mobile-plus-flex", "partners.orange_cofina_mobile_plus.orange_cofina_mobile_plus_flex_api"),
+    ("/svc/western-excel", "partners.western.app_western"),
+    ("/svc/western-flex", "partners.western.western_flex_api"),
     
 ]
 
@@ -97,6 +99,12 @@ PARTNER_ASGI: Dict[str, Dict[str, str]] = {
         "upload_path": "/process-excel",
         "flex_module": "partners.orange_cofina_mobile_plus.orange_cofina_mobile_plus_flex_api",
         "flex_path": "/orange-cofina-mobile-plus-flex",
+    },
+        "WESTERN": {
+        "upload_module": "partners.western.app_western",
+        "upload_path": "/map-agences",
+        "flex_module": "partners.western.western_flex_api",
+        "flex_path": "/western-flex",
     },
 }
 

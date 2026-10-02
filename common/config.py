@@ -833,3 +833,29 @@ PARTENAIRES["ORANGE_COFINA_MOBILE_PLUS"] = {
 }
 
 
+# ============================================================
+# PARTENAIRE WESTERN
+# ============================================================
+
+PARTENAIRES["WESTERN"] = {
+    "label": "Western Union",
+    "mode": MODE_AGENCE,
+
+    "upload_url": os.getenv(
+        "WESTERN_UPLOAD_URL",
+        f"{GATEWAY_BASE_URL}/svc/western-excel/map-agences",
+    ),
+
+    "flex_url": os.getenv(
+        "WESTERN_FLEX_URL",
+        f"{GATEWAY_BASE_URL}/svc/western-flex/western-flex",
+    ),
+
+    "tables": {
+        "excel": "COMPILATION_WESTERN",
+        "flex": "WESTERN_FLEX",
+        "reconciliation_agence": "RECONCILIATION_WESTERN",
+        "resume": "RESUME_WESTERN",
+    },
+}
+
