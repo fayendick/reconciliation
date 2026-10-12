@@ -39,7 +39,11 @@ PARTNER_MOUNTS: List[Tuple[str, str]] = [
     ("/svc/orange-cofina-mobile-plus-flex", "partners.orange_cofina_mobile_plus.orange_cofina_mobile_plus_flex_api"),
     ("/svc/western-excel", "partners.western.app_western"),
     ("/svc/western-flex", "partners.western.western_flex_api"),
-    
+    ("/svc/gtp-excel", "partners.gtp.app_gtp"),
+    ("/svc/gtp-flex", "partners.gtp.gtp_flex_api"),
+    ("/svc/gtp-agence-excel", "partners.gtp_agence.app_gtp_agence"),
+    ("/svc/gtp-agence-flex", "partners.gtp_agence.gtp_agence_flex_api"),
+
 ]
 
 # Cibles pour /charger (module + chemin interne de la sous-app)
@@ -105,6 +109,20 @@ PARTNER_ASGI: Dict[str, Dict[str, str]] = {
         "upload_path": "/map-agences",
         "flex_module": "partners.western.western_flex_api",
         "flex_path": "/western-flex",
+    },
+    "GTP": {
+        "upload_module": "partners.gtp.app_gtp",
+        "upload_path": "/process-excel",
+
+        "flex_module": "partners.gtp.gtp_flex_api",
+        "flex_path": "/gtp-flex",
+    },
+    "GTP_AGENCE": {
+        "upload_module": "partners.gtp_agence.app_gtp_agence",
+        "upload_path": "/process-excel",
+
+        "flex_module": "partners.gtp_agence.gtp_agence_flex_api",
+        "flex_path": "/gtp-agence-flex",
     },
 }
 

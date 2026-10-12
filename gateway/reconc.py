@@ -1020,6 +1020,28 @@ def run_reconciliation(partenaire: str = Query(...)):
     wf_b2w_raw = read_table(t["flex_b2w"])
 
     # --------------------------------------------------------
+    # Compatibilité GTP :
+    # Les tables GTP utilisent physiquement "NUMERO COMPTE"
+    # alors que le moteur de réconciliation utilise
+    # "NUMERO_COMPTE" comme nom interne.
+    #
+    # IMPORTANT :
+    # - uniquement pour GTP
+    # - aucune modification de la logique de rapprochement
+    # - aucun impact sur les autres partenaires
+    # --------------------------------------------------------
+    if partenaire.upper() == "GTP":
+        for df in (wp_w2b_raw, wp_b2w_raw, wf_w2b_raw, wf_b2w_raw):
+            if "NUMERO COMPTE" in df.columns and "NUMERO_COMPTE" not in df.columns:
+                df.rename(
+                    columns={"NUMERO COMPTE": "NUMERO_COMPTE"},
+                    inplace=True,
+                )
+
+    # --------------------------------------------------------
+    # Compatibilité PISPI :
+
+    # --------------------------------------------------------
     # Compatibilité PISPI :
     # le moteur commun attend "TYPE TRANSACTION"
     # alors que PISPI fournit "TYPE_TRANSACTION".
@@ -1080,11 +1102,16 @@ def run_reconciliation(partenaire: str = Query(...)):
         "apparier_par_telephone_montant",
         False,
     )
-    
+
     apparier_par_compte_montant = cfg.get(
         "apparier_par_compte_montant",
         False,
-    ) 
+    )
+
+    apparier_par_montant_date = cfg.get(
+        "apparier_par_montant_date",
+        False,
+    )
 
     try:
         resultats = []
@@ -1097,6 +1124,7 @@ def run_reconciliation(partenaire: str = Query(...)):
                 "W2B",
                 apparier_par_telephone_montant=apparier_par_telephone_montant,
                 apparier_par_compte_montant=apparier_par_compte_montant,
+                apparier_par_montant_date=apparier_par_montant_date,
             )
             resultat_w2b["SENS"] = "W2B"
             resultats.append(resultat_w2b)
@@ -1109,6 +1137,7 @@ def run_reconciliation(partenaire: str = Query(...)):
                 "B2W",
                 apparier_par_telephone_montant=apparier_par_telephone_montant,
                 apparier_par_compte_montant=apparier_par_compte_montant,
+                apparier_par_montant_date=apparier_par_montant_date,
             )
             resultat_b2w["SENS"] = "B2W"
             resultats.append(resultat_b2w)

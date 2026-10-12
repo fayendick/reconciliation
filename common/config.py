@@ -732,7 +732,7 @@ PARTENAIRES["PISPI"] = {
     "label": "PI/SPI",
     "mode": MODE_TWO_POINTERS,
     "apparier_par_compte_montant": True,
-    
+
 
     "upload_url": os.getenv(
         "PISPI_UPLOAD_URL",
@@ -830,6 +830,8 @@ PARTENAIRES["ORANGE_COFINA_MOBILE_PLUS"] = {
         "agence": None,
         "periode_fichier": "WF_DATE_VALEUR",
     },
+
+
 }
 
 
@@ -856,6 +858,85 @@ PARTENAIRES["WESTERN"] = {
         "flex": "WESTERN_FLEX",
         "reconciliation_agence": "RECONCILIATION_WESTERN",
         "resume": "RESUME_WESTERN",
+    },
+}
+
+# ============================================================
+# PARTENAIRE GTP API
+# ------------------------------------------------------------
+# Rechargement COFICARTE via GTP
+# ============================================================
+
+PARTENAIRES["GTP"] = {
+    "label": "GTP API",
+    "mode": MODE_TWO_POINTERS,
+
+    "apparier_par_compte_montant": True,
+
+    "upload_url": os.getenv(
+        "GTP_UPLOAD_URL",
+        f"{GATEWAY_BASE_URL}/svc/gtp-excel/process-excel",
+    ),
+
+    "flex_url": os.getenv(
+        "GTP_FLEX_URL",
+        f"{GATEWAY_BASE_URL}/svc/gtp-flex/gtp-flex",
+    ),
+
+    "tables": {
+        "excel": "COMPILATION_GTP",
+        "excel_w2b": "COMPILATION_GTP_W2B",
+        "excel_b2w": "COMPILATION_GTP_B2W",
+
+        "flex": "GTP_FLEX",
+        "flex_w2b": "GTP_FLEX_W2B",
+        "flex_b2w": "GTP_FLEX_B2W",
+
+        "reconciliation": "RECONCILIATION_GTP",
+        "doublons": "DOUBLONS_GTP",
+    },
+
+    "colonnes_resume": {
+        "num_tel_client": "WP_REFERENCE",
+        "nom_client": None,
+        "agence": "WF_LIBELLE_AGENCE",
+        "periode_fichier": "WF_DATE_HEURE",
+    },
+}
+PARTENAIRES["GTP_AGENCE"] = {
+    "label": "GTP Agence",
+    "mode": MODE_TWO_POINTERS,
+
+    "apparier_par_montant_date": True,
+
+    "upload_url": os.getenv(
+        "GTP_AGENCE_UPLOAD_URL",
+        f"{GATEWAY_BASE_URL}/svc/gtp-agence-excel/process-excel",
+    ),
+
+    "flex_url": os.getenv(
+        "GTP_AGENCE_FLEX_URL",
+        f"{GATEWAY_BASE_URL}/svc/gtp-agence-flex/gtp-agence-flex",
+    ),
+
+    "tables": {
+        "excel": "COMPILATION_GTP_AGENCE",
+        "excel_w2b": "COMPILATION_GTP_AGENCE_W2B",
+        "excel_b2w": "COMPILATION_GTP_AGENCE_B2W",
+
+        "flex": "GTP_AGENCE_FLEX",
+        "flex_w2b": "GTP_AGENCE_FLEX_W2B",
+        "flex_b2w": "GTP_AGENCE_FLEX_B2W",
+
+        "reconciliation": "RECONCILIATION_GTP_AGENCE",
+        "doublons": "DOUBLONS_GTP_AGENCE",
+    },
+
+    "colonnes_resume": {
+        "num_tel_client": "WP_ACCOUNT_ID",
+        "nom_client": "WP_LAST_NAME",
+        "agence": None,
+        "periode_fichier": "WP_DATE_HEURE",
     },
 }
 
